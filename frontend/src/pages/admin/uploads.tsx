@@ -9,8 +9,11 @@ import {
   PencilIcon,
   TrashIcon,
   XMarkIcon,
-  MagnifyingGlassIcon,
-  FunnelIcon
+  FunnelIcon,
+  DocumentPlusIcon,
+  CheckCircleIcon,
+  ChevronDownIcon,
+  ChevronUpIcon
 } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 
@@ -23,6 +26,7 @@ interface Paper {
   exam_type: string
   exam_date?: string
   pdf_path?: string
+  answer_key_path?: string | null
   uploaded_by: number
   uploader_username?: string
   processing_status: string
@@ -56,6 +60,11 @@ export default function AdminUploads() {
   const [viewingPaperId, setViewingPaperId] = useState<number | null>(null)
   const [questions, setQuestions] = useState<any[]>([])
   const [loadingQuestions, setLoadingQuestions] = useState(false)
+  const [openAnswers, setOpenAnswers] = useState<Record<number, boolean>>({})
+  const [showAnswerSchemeModal, setShowAnswerSchemeModal] = useState(false)
+  const [answerSchemePaper, setAnswerSchemePaper] = useState<Paper | null>(null)
+  const [answerSchemeFile, setAnswerSchemeFile] = useState<File | null>(null)
+  const [uploadingAnswerScheme, setUploadingAnswerScheme] = useState(false)
 
   useEffect(() => {
     if (!user) {
@@ -161,6 +170,42 @@ export default function AdminUploads() {
     } catch (error: any) {
       console.error('Failed to delete upload:', error)
       toast.error(error.response?.data?.detail || 'Failed to delete upload')
+    }
+  }
+
+  const openAnswerSchemeModal = (paper: Paper) => {
+    setAnswerSchemePaper(paper)
+    setAnswerSchemeFile(null)
+    setShowAnswerSchemeModal(true)
+  }
+
+  const handleUploadAnswerScheme = async () => {
+    if (!answerSchemePaper || !answerSchemeFile) {
+      toast.error('Please select a PDF or DOC/DOCX file')
+      return
+    }
+    const fn = answerSchemeFile.name.toLowerCase()
+    if (!fn.endsWith('.pdf') && !fn.endsWith('.docx') && !fn.endsWith('.doc')) {
+      toast.error('Answer scheme must be PDF or DOC/DOCX')
+      return
+    }
+    setUploadingAnswerScheme(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', answerSchemeFile)
+      await api.post(`/api/admin/papers/${answerSchemePaper.paper_id}/answer-key`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
+      toast.success('Answer scheme uploaded and linked to this question paper')
+      setShowAnswerSchemeModal(false)
+      setAnswerSchemePaper(null)
+      setAnswerSchemeFile(null)
+      fetchUploads()
+    } catch (error: any) {
+      console.error('Failed to upload answer scheme:', error)
+      toast.error(error.response?.data?.detail || 'Failed to upload answer scheme')
+    } finally {
+      setUploadingAnswerScheme(false)
     }
   }
 
@@ -304,6 +349,9 @@ export default function AdminUploads() {
                       File Info
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                      Answer Scheme
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
                       Uploaded By
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
@@ -317,7 +365,7 @@ export default function AdminUploads() {
                 <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                   {papers.length === 0 ? (
                     <tr>
-                      <td colSpan={9} className="px-6 py-4 text-center text-gray-500 dark:text-gray-400">
+                      <td colSpan={10} className="px-6 py-4 text-center text-gray-500 dark:text-gray-400">
                         No uploads found
                       </td>
                     </tr>
@@ -373,6 +421,16 @@ export default function AdminUploads() {
                             </div>
                           )}
                         </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          {paper.answer_key_path ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-full bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200">
+                              <CheckCircleIcon className="h-4 w-4" />
+                              Uploaded
+                            </span>
+                          ) : (
+                            <span className="text-xs text-gray-500 dark:text-gray-400">—</span>
+                          )}
+                        </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                           {paper.uploader_username || `User ${paper.uploaded_by}`}
                         </td>
@@ -380,6 +438,13 @@ export default function AdminUploads() {
                           {new Date(paper.created_at).toLocaleDateString()}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                          <button
+                            onClick={() => openAnswerSchemeModal(paper)}
+                            className="text-indigo-600 dark:text-indigo-400 hover:text-indigo-900 dark:hover:text-indigo-300 mr-4"
+                            title={paper.answer_key_path ? 'Replace answer scheme' : 'Upload answer scheme'}
+                          >
+                            <DocumentPlusIcon className="h-5 w-5" />
+                          </button>
                           {paper.total_questions_extracted > 0 && (
                             <button
                               onClick={() => handleViewQuestions(paper.paper_id)}
@@ -448,6 +513,7 @@ export default function AdminUploads() {
                       setShowQuestionsModal(false)
                       setViewingPaperId(null)
                       setQuestions([])
+                      setOpenAnswers({})
                     }}
                     className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
                   >
@@ -513,6 +579,32 @@ export default function AdminUploads() {
                         {q.classification_confidence !== null && (
                           <div className="text-xs text-gray-500 dark:text-gray-400 mt-2">
                             Confidence: {(q.classification_confidence * 100).toFixed(1)}%
+                          </div>
+                        )}
+                        {q.answer_text && (
+                          <div className="mt-4 border-t border-gray-200 dark:border-gray-700 pt-4">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setOpenAnswers((prev) => ({
+                                  ...prev,
+                                  [q.question_id]: !prev[q.question_id],
+                                }))
+                              }
+                              className="flex items-center text-sm font-medium text-primary-600 dark:text-primary-400 hover:underline"
+                            >
+                              {openAnswers[q.question_id] ? (
+                                <ChevronUpIcon className="h-4 w-4 mr-1" />
+                              ) : (
+                                <ChevronDownIcon className="h-4 w-4 mr-1" />
+                              )}
+                              Answer
+                            </button>
+                            {openAnswers[q.question_id] && (
+                              <div className="mt-3 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap">
+                                {q.answer_text}
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
@@ -636,6 +728,67 @@ export default function AdminUploads() {
                     className="px-4 py-2 text-sm font-medium text-white bg-teal-600 hover:bg-teal-700 rounded-md"
                   >
                     Update
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Upload Answer Scheme Modal */}
+        {showAnswerSchemeModal && answerSchemePaper && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl max-w-md w-full mx-4">
+              <div className="p-6">
+                <div className="flex justify-between items-center mb-4">
+                  <h2 className="text-xl font-bold text-gray-900 dark:text-white">Upload Answer Scheme</h2>
+                  <button
+                    onClick={() => {
+                      setShowAnswerSchemeModal(false)
+                      setAnswerSchemePaper(null)
+                      setAnswerSchemeFile(null)
+                    }}
+                    className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+                  >
+                    <XMarkIcon className="h-6 w-6" />
+                  </button>
+                </div>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                  Link an answer scheme (PDF or DOC/DOCX) to this question paper: <strong className="text-gray-900 dark:text-white">{answerSchemePaper.course_code}</strong> — {answerSchemePaper.exam_type} (Year {answerSchemePaper.academic_year}, {answerSchemePaper.semester_type}).
+                </p>
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Answer scheme file (PDF, DOC, or DOCX)
+                  </label>
+                  <input
+                    type="file"
+                    accept=".pdf,.doc,.docx"
+                    onChange={(e) => setAnswerSchemeFile(e.target.files?.[0] || null)}
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-teal-500 focus:border-teal-500 dark:bg-gray-700 dark:text-white text-sm"
+                  />
+                  {answerSchemeFile && (
+                    <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                      Selected: {answerSchemeFile.name}
+                    </p>
+                  )}
+                </div>
+                <div className="flex justify-end space-x-3">
+                  <button
+                    onClick={() => {
+                      setShowAnswerSchemeModal(false)
+                      setAnswerSchemePaper(null)
+                      setAnswerSchemeFile(null)
+                    }}
+                    className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-md hover:bg-gray-200 dark:hover:bg-gray-600"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleUploadAnswerScheme}
+                    disabled={!answerSchemeFile || uploadingAnswerScheme}
+                    className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-md disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {uploadingAnswerScheme ? 'Uploading…' : 'Upload & link'}
                   </button>
                 </div>
               </div>

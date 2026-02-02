@@ -113,8 +113,9 @@ class OCRService:
     def extract_text_from_pdf(self, pdf_path: str, output_dir: str = None) -> Dict:
         """Extract text from PDF using OCR"""
         try:
-            # Convert PDF to images
-            pages = convert_from_path(pdf_path, dpi=300)
+            # Convert PDF to images (POPPLER_PATH for Windows: set to Poppler bin folder)
+            poppler_path = os.environ.get("POPPLER_PATH") or None
+            pages = convert_from_path(pdf_path, dpi=300, poppler_path=poppler_path)
             
             results = {
                 "total_pages": len(pages),

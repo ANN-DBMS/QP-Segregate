@@ -10,12 +10,13 @@ from app.services.classification_service import ClassificationService
 from app.services.file_conversion_service import FileConversionService
 from app.services.llm_extraction_service import LLMExtractionService
 from app.services.llm_classification_service import LLMClassificationService
+from app.services.embedding_service import EmbeddingService
 from app.core.local_cloud_storage import local_cloud_storage
 from app.tasks.celery import celery
 import os
 import json
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
 import pymongo
 from pymongo import MongoClient
 
@@ -79,13 +80,10 @@ def process_question_paper(self, paper_id: int):
         paper.processing_progress = 0
         db.commit()
         
-        # Step 1: File Conversion (PDF/DOCX to text/images)
+        # Step 1 & 2: For PDF, send directly to GPT-4o; for DOCX, convert then extract
         self.update_state(state='PROGRESS', meta={'step': 'File Conversion', 'progress': 10})
-        file_content = convert_file_for_llm(paper)
-        
-        # Step 2: LLM Question Extraction
         self.update_state(state='PROGRESS', meta={'step': 'LLM Extraction', 'progress': 30})
-        questions = extract_questions_with_llm(file_content)
+        questions = extract_questions_from_paper(paper)
         
         # Step 3: LLM Classification (units and topic tags)
         self.update_state(state='PROGRESS', meta={'step': 'LLM Classification', 'progress': 50})
@@ -131,24 +129,39 @@ def process_question_paper(self, paper_id: int):
         db.close()
 
 def convert_file_for_llm(paper: QuestionPaper) -> Dict:
-    """Convert PDF/DOCX file to text and images for LLM processing"""
+    """Convert PDF/DOCX file to text and images for LLM processing (used for non-PDF or fallback)."""
     file_path = paper.pdf_path
     if not file_path or not os.path.exists(file_path):
         raise Exception(f"File not found: {file_path}")
-    
-    # Convert file using FileConversionService
     conversion_result = file_conversion_service.convert_file(file_path)
-    
-    # Prepare for LLM API
-    llm_content = file_conversion_service.prepare_for_llm(conversion_result)
-    
-    return llm_content
+    return file_conversion_service.prepare_for_llm(conversion_result)
 
-def extract_questions_with_llm(file_content: Dict) -> List[Dict]:
-    """Extract questions using LLM"""
+def extract_questions_with_llm(file_content: Dict, is_answer_scheme: bool = False) -> List[Dict]:
+    """Extract questions using LLM from prepared file content (text + images)."""
     extraction_service = get_llm_extraction_service()
-    questions = extraction_service.extract_questions_with_llm(file_content)
-    return questions
+    return extraction_service.extract_questions_with_llm(file_content, is_answer_scheme=is_answer_scheme)
+
+def extract_questions_from_paper(paper: QuestionPaper, file_content: Optional[Dict] = None) -> List[Dict]:
+    """
+    Extract questions from paper. For PDFs, tries direct PDF to GPT-4o (Responses API) if available;
+    otherwise falls back to converted text/images and Chat Completions. For DOCX, uses conversion + Chat Completions.
+    When paper.content_type is "answer_scheme", also extracts answer_text per question.
+    """
+    is_answer_scheme = getattr(paper, "content_type", "question_paper") == "answer_scheme"
+    extraction_service = get_llm_extraction_service()
+    file_path = (paper.pdf_path or "").strip()
+    if file_path.lower().endswith(".pdf") and os.path.exists(file_path):
+        try:
+            return extraction_service.extract_questions_from_pdf(file_path, is_answer_scheme=is_answer_scheme)
+        except Exception:
+            # Responses API not available (e.g. 'OpenAI' object has no attribute 'responses')
+            # or other PDF direct-call failure; fall back to convert PDF then Chat Completions.
+            if file_content is None:
+                file_content = convert_file_for_llm(paper)
+            return extract_questions_with_llm(file_content, is_answer_scheme=is_answer_scheme)
+    if file_content is None:
+        file_content = convert_file_for_llm(paper)
+    return extract_questions_with_llm(file_content, is_answer_scheme=is_answer_scheme)
 
 def classify_questions_with_llm(questions: List[Dict], course_code: str, db) -> List[Dict]:
     """Classify questions to units and generate topic tags using LLM"""
@@ -293,6 +306,44 @@ def save_questions(questions: List[Dict], paper: QuestionPaper, db):
                     continue
                 
                 # Create question object
+                embedding = None
+                try:
+                    embedding = EmbeddingService.embed_text(question_data.get('question_text'))
+                except Exception as e:
+                    logger.warning(f"Failed to generate embedding for question {idx}: {e}")
+
+                # Auto-link variants within the same course+unit using embeddings (scoped, best-effort)
+                is_canonical = question_data.get('is_canonical', True)
+                parent_question_id = question_data.get('parent_question_id')
+                similarity_score = question_data.get('similarity_score')
+
+                try:
+                    unit_id = question_data.get('unit_id')
+                    if embedding and unit_id:
+                        candidate = db.query(Question).filter(
+                            Question.course_code == paper.course_code,
+                            Question.unit_id == unit_id,
+                            Question.question_embedding.isnot(None),
+                            Question.paper_id != paper.paper_id,
+                        ).order_by(
+                            Question.question_embedding.cosine_distance(embedding)
+                        ).first()
+
+                        if candidate is not None:
+                            # Because we normalize embeddings, cosine_distance ~= (1 - cosine_similarity)
+                            dist = db.query(
+                                Question.question_embedding.cosine_distance(embedding)
+                            ).filter(Question.question_id == candidate.question_id).scalar()
+                            if dist is not None:
+                                sim = 1.0 - float(dist)
+                                if sim >= settings.SIMILARITY_THRESHOLD:
+                                    canonical_id = candidate.parent_question_id or candidate.question_id
+                                    is_canonical = False
+                                    parent_question_id = canonical_id
+                                    similarity_score = sim
+                except Exception as e:
+                    logger.warning(f"Variant auto-link failed for question {idx}: {e}")
+
                 question = Question(
                     paper_id=paper.paper_id,
                     course_code=paper.course_code,
@@ -305,13 +356,15 @@ def save_questions(questions: List[Dict], paper: QuestionPaper, db):
                     bloom_confidence=None,  # LLM doesn't provide confidence for Bloom
                     difficulty_level=None,  # Can be added later if needed
                     classification_confidence=question_data.get('classification_confidence', 0),
-                    is_canonical=question_data.get('is_canonical', True),
-                    parent_question_id=question_data.get('parent_question_id'),
-                    similarity_score=question_data.get('similarity_score'),
+                    is_canonical=is_canonical,
+                    parent_question_id=parent_question_id,
+                    similarity_score=similarity_score,
                     has_subparts=question_data.get('has_subparts', False),
                     has_mathematical_notation=question_data.get('has_mathematical_notation', False),
                     page_number=question_data.get('page_number'),
                     topic_tags=topic_tags_json,
+                    question_embedding=embedding,
+                    answer_text=question_data.get('answer_text'),  # Populated when paper is answer_scheme
                     is_reviewed=False,  # All questions start as unreviewed
                     review_status=ReviewStatus.PENDING
                 )

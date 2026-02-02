@@ -4,11 +4,12 @@ from typing import List, Optional
 import os
 from app.core.database import get_db
 from app.models.user import User
-from app.models.question import Question, StudentBookmark
+from app.models.question import Question, StudentBookmark, AnswerAsset
 from app.models.question_paper import QuestionPaper
 from app.models.course import Course, CourseEquivalence, CourseOffering
 from app.models.question_paper import QuestionPaper, ExamType
 from app.api.auth import get_current_user
+from app.services.embedding_service import EmbeddingService
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -44,11 +45,14 @@ class QuestionResponse(BaseModel):
     academic_year: int
     semester_type: str
     exam_date: Optional[str]
+    paper_id: Optional[int] = None
     variant_count: int = 0
     topic_tags: Optional[List[str]] = None
     is_reviewed: bool = False
     review_status: Optional[str] = None
     image_path: Optional[str] = None
+    answer_text: Optional[str] = None
+    answer_assets: Optional[List[dict]] = None
     
     class Config:
         from_attributes = True
@@ -96,7 +100,12 @@ async def search_questions(
     try:
         # Build query with filters
         # Show all questions - students should see all uploaded questions
-        query = db.query(Question)
+        from sqlalchemy.orm import joinedload
+        query = db.query(Question).options(
+            joinedload(Question.unit),
+            joinedload(Question.paper),
+            joinedload(Question.answer_assets),
+        )
         
         # Apply filters
         filters = request.filters if request.filters else {}
@@ -179,10 +188,26 @@ async def search_questions(
             elif review_status == "non-reviewed":
                 query = query.filter(Question.is_reviewed == False)
         
-        # Allow empty query to show all questions (browsing mode)
+        # Semantic search (optional). Allow empty query to show all questions (browsing mode).
         query_str = request.query if request.query else ""
         if query_str and query_str.strip():
-            query = query.filter(Question.question_text.ilike(f"%{query_str.strip()}%"))
+            qvec = None
+            try:
+                qvec = EmbeddingService.embed_text(query_str)
+            except Exception:
+                qvec = None
+
+            if qvec:
+                # Order by cosine distance (smaller is closer / more similar)
+                query = query.filter(Question.question_embedding.isnot(None)).order_by(
+                    Question.question_embedding.cosine_distance(qvec)
+                )
+            else:
+                # Fallback to case-insensitive keyword search
+                query = query.filter(Question.question_text.ilike(f"%{query_str.strip()}%"))
+        else:
+            # Default browsing order (newest first)
+            query = query.order_by(Question.created_at.desc())
         
         # Get total count before pagination
         total = query.count()
@@ -229,11 +254,22 @@ async def search_questions(
                 academic_year=paper.academic_year if paper else None,
                 semester_type=paper.semester_type.value if paper and paper.semester_type else None,
                 exam_date=paper.exam_date.isoformat() if paper and paper.exam_date else None,
+                paper_id=q.paper_id,
                 variant_count=variant_count,
                 topic_tags=topic_tags,
                 is_reviewed=q.is_reviewed,
                 review_status=q.review_status.value if q.review_status else None,
-                image_path=q.image_path
+                image_path=q.image_path,
+                answer_text=q.answer_text,
+                answer_assets=[
+                    {
+                        "answer_asset_id": a.answer_asset_id,
+                        "file_path": a.file_path,
+                        "caption": a.caption,
+                        "created_at": a.created_at.isoformat() if a.created_at else None,
+                    }
+                    for a in (getattr(q, "answer_assets", None) or [])
+                ] if (getattr(q, "answer_assets", None) is not None) else None,
             ))
         
         return {
@@ -356,7 +392,19 @@ async def get_bookmarks(
                 "semester_type": q.paper.semester_type.value if q.paper else None,
                 "topic_tags": topic_tags,
                 "is_reviewed": q.is_reviewed,
-                "review_status": q.review_status.value if q.review_status else None
+                "review_status": q.review_status.value if q.review_status else None,
+                "image_path": q.image_path,
+                "paper_id": q.paper_id,
+                "answer_text": q.answer_text,
+                "answer_assets": [
+                    {
+                        "answer_asset_id": a.answer_asset_id,
+                        "file_path": a.file_path,
+                        "caption": a.caption,
+                        "created_at": a.created_at.isoformat() if a.created_at else None,
+                    }
+                    for a in (getattr(q, "answer_assets", None) or [])
+                ] if (getattr(q, "answer_assets", None) is not None) else None,
             }
         })
     
@@ -445,6 +493,18 @@ async def get_question_papers(
     
     return papers
 
+def _resolve_pdf_path(pdf_path: str) -> str:
+    """Resolve relative pdf_path to absolute path (backend root = parent of app/)."""
+    if not pdf_path:
+        return ""
+    if os.path.isabs(pdf_path):
+        return pdf_path
+    # Backend root: .../backend (parent of app/)
+    backend_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    resolved = os.path.normpath(os.path.join(backend_root, pdf_path))
+    return resolved
+
+
 @router.get("/papers/{paper_id}/download")
 async def download_question_paper(
     paper_id: int,
@@ -459,14 +519,34 @@ async def download_question_paper(
     if not paper:
         raise HTTPException(status_code=404, detail="Question paper not found")
     
-    if not paper.pdf_path or not os.path.exists(paper.pdf_path):
+    if not paper.pdf_path:
         raise HTTPException(status_code=404, detail="File not found")
     
-    from fastapi.responses import FileResponse
-    return FileResponse(
-        paper.pdf_path,
+    file_path = _resolve_pdf_path(paper.pdf_path)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    try:
+        with open(file_path, "rb") as f:
+            content = f.read()
+    except OSError as e:
+        raise HTTPException(status_code=500, detail="Could not read file")
+    
+    if not content or len(content) < 4:
+        raise HTTPException(status_code=404, detail="File is empty or invalid")
+    
+    if content[:4] != b"%PDF":
+        raise HTTPException(status_code=404, detail="File is not a valid PDF")
+    
+    from fastapi.responses import Response
+    filename = os.path.basename(paper.pdf_path)
+    return Response(
+        content=content,
         media_type="application/pdf",
-        filename=os.path.basename(paper.pdf_path)
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(content)),
+        },
     )
 
 @router.delete("/bookmark/{question_id}")

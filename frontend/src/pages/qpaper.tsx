@@ -177,6 +177,7 @@ export default function QPaperAI() {
                   width={150}
                   height={45}
                   className="h-auto"
+                  style={{ width: 'auto', height: 'auto' }}
                   priority
                 />
               </div>

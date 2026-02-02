@@ -28,8 +28,11 @@ except ImportError:
 
 try:
     from pdf2image import convert_from_path
+    from pdf2image.exceptions import PDFInfoNotInstalledError
     PDF2IMAGE_AVAILABLE = True
 except ImportError:
+    convert_from_path = None
+    PDFInfoNotInstalledError = Exception  # unused when pdf2image missing
     PDF2IMAGE_AVAILABLE = False
 
 
@@ -72,10 +75,13 @@ class FileConversionService:
         # Try to extract text first (for text-based PDFs)
         text_content = self._extract_text_from_pdf(pdf_path)
         
+        # Get page count without Poppler (for fallback when images unavailable)
+        page_count_fallback = self._get_pdf_page_count(pdf_path)
+        
         # Convert PDF pages to images (for vision models and image-based PDFs)
         page_images = self._convert_pdf_pages_to_images(pdf_path)
         
-        result['page_count'] = len(page_images)
+        result['page_count'] = len(page_images) if page_images else page_count_fallback
         
         # Combine text from all pages
         if text_content:
@@ -127,16 +133,41 @@ class FileConversionService:
         
         return '\n\n'.join(text_parts)
     
+    def _get_pdf_page_count(self, pdf_path: str) -> int:
+        """Get PDF page count without Poppler (using PyPDF2 or pdfplumber)."""
+        if PDFPLUMBER_AVAILABLE:
+            try:
+                with pdfplumber.open(pdf_path) as pdf:
+                    return len(pdf.pages)
+            except Exception:
+                pass
+        if PYPDF2_AVAILABLE:
+            try:
+                import PyPDF2
+                with open(pdf_path, 'rb') as f:
+                    return len(PyPDF2.PdfReader(f).pages)
+            except Exception:
+                pass
+        return 0
+    
     def _convert_pdf_pages_to_images(self, pdf_path: str) -> List[Image.Image]:
-        """Convert PDF pages to PIL Images"""
+        """Convert PDF pages to PIL Images. Returns empty list if Poppler is not available (text-only fallback)."""
         if not PDF2IMAGE_AVAILABLE:
             raise ImportError("pdf2image is required for PDF to image conversion. Install with: pip install pdf2image")
         
+        poppler_path = os.environ.get("POPPLER_PATH") or None
         try:
-            # Convert PDF to images (300 DPI for good quality)
-            images = convert_from_path(pdf_path, dpi=300)
+            # Convert PDF to images (300 DPI for good quality). POPPLER_PATH allows Windows users to point to Poppler bin folder.
+            images = convert_from_path(pdf_path, dpi=300, poppler_path=poppler_path)
             return images
+        except PDFInfoNotInstalledError:
+            # Poppler not installed or not in PATH - fall back to text-only processing so pipeline can continue
+            return []
         except Exception as e:
+            err_lower = str(e).lower()
+            if "poppler" in err_lower or "pdfinfo" in err_lower or "path" in err_lower and "find" in err_lower:
+                # Likely Poppler/ PATH issue; fall back to text-only
+                return []
             raise Exception(f"Failed to convert PDF to images: {e}")
     
     def convert_docx_to_text_and_images(self, docx_path: str) -> Dict:

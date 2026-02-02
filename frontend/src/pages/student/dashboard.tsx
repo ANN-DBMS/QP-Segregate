@@ -20,7 +20,7 @@ interface Course {
 }
 
 export default function StudentDashboard() {
-  const { user, logout } = useAuth()
+  const { user, logout, loading: authLoading } = useAuth()
   const router = useRouter()
   const [courses, setCourses] = useState<Course[]>([])
   const [loading, setLoading] = useState(true)
@@ -59,7 +59,6 @@ export default function StudentDashboard() {
     try {
       // Use the api utility to ensure correct backend URL
       const response = await api.get('/api/student/my-courses')
-      console.log('Fetched courses:', response.data)
       setCourses(Array.isArray(response.data) ? response.data : [])
     } catch (error: any) {
       console.error('Failed to fetch courses:', error)
@@ -83,7 +82,7 @@ export default function StudentDashboard() {
     }
   }
 
-  if (loading) {
+  if (authLoading || loading) {
     return (
       <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center transition-colors">
         <div className="text-center">

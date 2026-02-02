@@ -94,6 +94,71 @@ class LLMClassificationService:
         except Exception as e:
             raise Exception(f"LLM classification failed: {e}")
     
+    def _flatten_topic_list(self, topic_list: list, out_topics: list) -> List[str]:
+        """Append all topic strings from topic_list to out_topics; return list of strings for display."""
+        result = []
+        for t in topic_list:
+            if isinstance(t, str):
+                s = t.strip()
+            elif isinstance(t, dict):
+                s = str(t.get('name') or t.get('title') or t).strip()
+            else:
+                s = str(t).strip()
+            if s:
+                result.append(s)
+                out_topics.append(s)
+        return result
+
+    def _normalize_unit_topics(self, unit_topics):
+        """
+        Normalize unit.topics to a flat list of topic strings and an optional display string.
+        Supports:
+        - Nested structure: { "Category": ["topic1", "topic2"], ... } (flattened; display shows categories)
+        - Flat list: ["topic1", "topic2"] or [{"name": "topic1"}, ...]
+        Returns:
+            (topics: List[str], topics_display: Optional[str])
+        """
+        if not unit_topics:
+            return [], None
+        try:
+            raw = json.loads(unit_topics) if isinstance(unit_topics, str) else unit_topics
+        except (json.JSONDecodeError, TypeError):
+            if isinstance(unit_topics, str):
+                flat = [t.strip() for t in unit_topics.replace('\n', ',').split(',') if t.strip()]
+                return flat, None
+            return [], None
+        topics = []
+        topics_display = None
+        if isinstance(raw, dict):
+            # Nested: { "Category": ["topic1", "topic2"], ... } or { "UnitName": { "Category": [...] }, ... }
+            lines = []
+            for category_name, topic_list in raw.items():
+                if isinstance(topic_list, list):
+                    cat_topics = self._flatten_topic_list(topic_list, topics)
+                    if cat_topics:
+                        lines.append(f"  {category_name}: {', '.join(cat_topics)}")
+                elif isinstance(topic_list, dict):
+                    # One more level: e.g. { "Introduction to NoSQL": { "Aggregate Data Models": [...] } }
+                    for sub_name, sub_list in topic_list.items():
+                        if isinstance(sub_list, list):
+                            cat_topics = self._flatten_topic_list(sub_list, topics)
+                            if cat_topics:
+                                lines.append(f"  {sub_name}: {', '.join(cat_topics)}")
+            if lines:
+                topics_display = "\n".join(lines)
+        elif isinstance(raw, list):
+            for t in raw:
+                if isinstance(t, str):
+                    topics.append(t.strip())
+                elif isinstance(t, dict):
+                    topics.append(str(t.get('name') or t.get('title') or t).strip())
+                else:
+                    topics.append(str(t).strip())
+        else:
+            return [], None
+        topics = [t for t in topics if t]
+        return topics, topics_display
+    
     def _load_syllabus(self, course_code: str, db: Session) -> Dict:
         """Load course syllabus (units and topics) from PostgreSQL"""
         # Get course units
@@ -105,28 +170,16 @@ class LLMClassificationService:
         if not units:
             return None
         
-        # Parse units and topics
+        # Parse units and topics (normalize to list of strings; support nested structure)
         syllabus_units = []
         for unit in units:
-            # Parse topics from JSON string
-            topics = []
-            if unit.topics:
-                try:
-                    topics = json.loads(unit.topics) if isinstance(unit.topics, str) else unit.topics
-                    if not isinstance(topics, list):
-                        topics = [topics] if topics else []
-                except (json.JSONDecodeError, TypeError):
-                    # If not JSON, try to split by comma or newline
-                    if isinstance(unit.topics, str):
-                        topics = [t.strip() for t in unit.topics.replace('\n', ',').split(',') if t.strip()]
-                    else:
-                        topics = []
-            
+            topics, topics_display = self._normalize_unit_topics(unit.topics)
             syllabus_units.append({
                 'unit_id': unit.unit_id,
                 'unit_number': unit.unit_number,
                 'unit_name': unit.unit_name,
-                'topics': topics
+                'topics': topics,
+                'topics_display': topics_display  # optional; shows category grouping when syllabus is nested
             })
         
         return {
@@ -140,7 +193,9 @@ class LLMClassificationService:
         syllabus_text = "Syllabus:\n"
         for unit in syllabus_data['units']:
             syllabus_text += f"\nUnit {unit['unit_number']} (ID: {unit['unit_id']}): {unit['unit_name']}\n"
-            if unit.get('topics'):
+            if unit.get('topics_display'):
+                syllabus_text += unit['topics_display'] + "\n"
+            elif unit.get('topics'):
                 syllabus_text += "Topics: " + ", ".join(unit['topics']) + "\n"
         
         # Format questions
@@ -231,8 +286,19 @@ Important:
             
             unit_id = classification.get('unit_id')
             unit_name = None
-            topic_tags = classification.get('topic_tags', [])
+            topic_tags_raw = classification.get('topic_tags', [])
             confidence = classification.get('confidence', 0.0)
+            
+            # Normalize to list of strings (LLM may return dicts)
+            topic_tags = []
+            for t in topic_tags_raw if isinstance(topic_tags_raw, list) else []:
+                if isinstance(t, str):
+                    topic_tags.append(t.strip())
+                elif isinstance(t, dict):
+                    topic_tags.append(str(t.get('name') or t.get('title') or t).strip())
+                else:
+                    topic_tags.append(str(t).strip())
+            topic_tags = [t for t in topic_tags if t]
             
             # Validate unit_id exists in syllabus
             if unit_id and unit_id in unit_lookup:

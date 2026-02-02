@@ -49,9 +49,14 @@ export default function AdminReview() {
     marks: '',
     bloom_taxonomy_level: '',
     bloom_category: '',
-    topic_tags: ''  // Comma-separated
+    topic_tags: '',  // Comma-separated
+    answer_text: '',
+    parent_question_id: ''
   })
   const [imageFile, setImageFile] = useState<File | null>(null)
+  const [answerAssetFile, setAnswerAssetFile] = useState<File | null>(null)
+  const [answerAssetCaption, setAnswerAssetCaption] = useState('')
+  const [uploadingAnswerAsset, setUploadingAnswerAsset] = useState(false)
   const [units, setUnits] = useState<any[]>([])
   const [corrections, setCorrections] = useState({
     unit_id: '',
@@ -106,7 +111,9 @@ export default function AdminReview() {
         marks: question.marks?.toString() || '',
         bloom_taxonomy_level: question.bloom_level?.toString() || '',
         bloom_category: question.bloom_category || '',
-        topic_tags: topicTagsStr
+        topic_tags: topicTagsStr,
+        answer_text: question.answer_text || '',
+        parent_question_id: question.parent_question_id ? String(question.parent_question_id) : ''
       })
       
       // Fetch units for the course
@@ -149,6 +156,16 @@ export default function AdminReview() {
       }
       
       await api.put(`/api/admin/questions/${editingQuestion.question_id}`, payload)
+
+      // Save answer text (optional; allow clearing)
+      await api.put(`/api/admin/questions/${editingQuestion.question_id}/answer`, {
+        answer_text: editForm.answer_text ?? ''
+      })
+
+      // Optional: override variant parent
+      await api.put(`/api/admin/questions/${editingQuestion.question_id}/variant-parent`, {
+        parent_question_id: editForm.parent_question_id ? parseInt(editForm.parent_question_id) : null
+      })
       toast.success('Question updated successfully')
       setShowEditModal(false)
       setEditingQuestion(null)
@@ -159,6 +176,42 @@ export default function AdminReview() {
     } catch (error: any) {
       console.error('Failed to update question:', error)
       toast.error(error.response?.data?.detail || 'Failed to update question')
+    }
+  }
+
+  const handleUploadAnswerAsset = async () => {
+    if (!editingQuestion || !answerAssetFile) {
+      toast.error('Please select an answer image')
+      return
+    }
+    setUploadingAnswerAsset(true)
+    try {
+      const fd = new FormData()
+      fd.append('file', answerAssetFile)
+      if (answerAssetCaption.trim()) fd.append('caption', answerAssetCaption.trim())
+
+      await api.post(`/api/admin/questions/${editingQuestion.question_id}/answer/assets`, fd)
+      toast.success('Answer image uploaded')
+      setAnswerAssetFile(null)
+      setAnswerAssetCaption('')
+      await fetchQuestionDetails(editingQuestion.question_id)
+    } catch (error: any) {
+      console.error('Failed to upload answer image:', error)
+      toast.error(error.response?.data?.detail || 'Failed to upload answer image')
+    } finally {
+      setUploadingAnswerAsset(false)
+    }
+  }
+
+  const handleDeleteAnswerAsset = async (assetId: number) => {
+    if (!editingQuestion) return
+    try {
+      await api.delete(`/api/admin/questions/${editingQuestion.question_id}/answer/assets/${assetId}`)
+      toast.success('Answer image removed')
+      await fetchQuestionDetails(editingQuestion.question_id)
+    } catch (error: any) {
+      console.error('Failed to delete answer image:', error)
+      toast.error(error.response?.data?.detail || 'Failed to delete answer image')
     }
   }
 
@@ -504,6 +557,21 @@ export default function AdminReview() {
                       </div>
                     )}
 
+                    {/* Answer section - visible entry point to add/edit answer */}
+                    <div className="p-4 rounded-lg border border-teal-200 dark:border-teal-700 bg-teal-50/50 dark:bg-teal-900/20">
+                      <h3 className="text-sm font-semibold text-teal-800 dark:text-teal-200 mb-2">Answer</h3>
+                      <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+                        Add or edit the question&apos;s answer text and images in the edit form.
+                      </p>
+                      <button
+                        onClick={() => handleEdit(selectedItem.question_id)}
+                        className="inline-flex items-center gap-2 px-3 py-2 text-sm font-medium text-teal-700 dark:text-teal-300 bg-teal-100 dark:bg-teal-800/50 hover:bg-teal-200 dark:hover:bg-teal-800 rounded-lg transition-colors"
+                      >
+                        <PencilIcon className="h-4 w-4" />
+                        Edit question (add / edit answer)
+                      </button>
+                    </div>
+
                     <div className="space-y-3">
                       <div>
                         <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
@@ -612,6 +680,85 @@ export default function AdminReview() {
                     />
                   </div>
 
+                  {/* Answer section - placed high so it's visible without scrolling */}
+                  <div className="p-4 rounded-lg border-2 border-teal-200 dark:border-teal-700 bg-teal-50/50 dark:bg-teal-900/20">
+                    <h3 className="text-sm font-semibold text-teal-800 dark:text-teal-200 mb-3">Answer (optional)</h3>
+                    <div className="mb-4">
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        Answer text
+                      </label>
+                      <textarea
+                        rows={4}
+                        className="input-field dark:bg-gray-700 dark:border-gray-600 dark:text-white w-full"
+                        value={editForm.answer_text}
+                        onChange={(e) => setEditForm(prev => ({ ...prev, answer_text: e.target.value }))}
+                        placeholder="Type the answer/solution here (optional)"
+                      />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Answer images</h4>
+                      {Array.isArray(editingQuestion.answer_assets) && editingQuestion.answer_assets.length > 0 ? (
+                        <div className="space-y-3 mb-4">
+                          {editingQuestion.answer_assets.map((asset: any) => (
+                            <div key={asset.answer_asset_id} className="flex items-start justify-between gap-4">
+                              <div className="flex-1">
+                                <img
+                                  src={`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/${asset.file_path}`}
+                                  alt={asset.caption || 'Answer image'}
+                                  className="max-w-full h-auto max-h-32 rounded-lg border border-gray-200 dark:border-gray-700"
+                                  onError={(e) => {
+                                    e.currentTarget.style.display = 'none'
+                                  }}
+                                />
+                                {asset.caption && (
+                                  <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{asset.caption}</div>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteAnswerAsset(asset.answer_asset_id)}
+                                className="text-sm text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">No answer images yet.</p>
+                      )}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Image file</label>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            onChange={(e) => setAnswerAssetFile(e.target.files?.[0] || null)}
+                            className="input-field dark:bg-gray-700 dark:border-gray-600 dark:text-white w-full text-sm"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Caption (optional)</label>
+                          <input
+                            type="text"
+                            value={answerAssetCaption}
+                            onChange={(e) => setAnswerAssetCaption(e.target.value)}
+                            className="input-field dark:bg-gray-700 dark:border-gray-600 dark:text-white w-full"
+                            placeholder="e.g., diagram"
+                          />
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleUploadAnswerAsset}
+                        disabled={uploadingAnswerAsset || !answerAssetFile}
+                        className="mt-2 btn-secondary text-sm disabled:opacity-50"
+                      >
+                        {uploadingAnswerAsset ? 'Uploading...' : 'Upload answer image'}
+                      </button>
+                    </div>
+                  </div>
+
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
@@ -691,11 +838,29 @@ export default function AdminReview() {
                     />
                   </div>
 
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      Variant Group Parent (Optional)
+                    </label>
+                    <input
+                      type="number"
+                      className="input-field dark:bg-gray-700 dark:border-gray-600 dark:text-white w-full"
+                      value={editForm.parent_question_id}
+                      onChange={(e) => setEditForm(prev => ({ ...prev, parent_question_id: e.target.value }))}
+                      placeholder="Canonical question ID (leave empty to make canonical)"
+                    />
+                    <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      Use this to manually group reworded questions under one canonical question.
+                    </p>
+                  </div>
+
                   <div className="flex justify-end space-x-3 pt-4">
                     <button
                       onClick={() => {
                         setShowEditModal(false)
                         setEditingQuestion(null)
+                        setAnswerAssetFile(null)
+                        setAnswerAssetCaption('')
                       }}
                       className="btn-secondary"
                     >

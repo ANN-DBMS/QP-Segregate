@@ -25,20 +25,9 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(() => {
-    // Initialize user from localStorage if available (for faster page loads)
-    if (typeof window !== 'undefined') {
-      const storedUser = localStorage.getItem('user')
-      if (storedUser) {
-        try {
-          return JSON.parse(storedUser)
-        } catch (e) {
-          localStorage.removeItem('user')
-        }
-      }
-    }
-    return null
-  })
+  // Always start as null/true so server and client first paint match (avoids hydration error).
+  // User is restored from localStorage in useEffect after mount.
+  const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {

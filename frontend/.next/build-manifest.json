@@ -22,25 +22,30 @@
       "static/chunks/main.js",
       "static/chunks/pages/_error.js"
     ],
-    "/admin/question-bank": [
+    "/admin/dashboard": [
       "static/chunks/webpack.js",
       "static/chunks/main.js",
-      "static/chunks/pages/admin/question-bank.js"
+      "static/chunks/pages/admin/dashboard.js"
     ],
-    "/student/bookmarks": [
+    "/admin/login": [
       "static/chunks/webpack.js",
       "static/chunks/main.js",
-      "static/chunks/pages/student/bookmarks.js"
+      "static/chunks/pages/admin/login.js"
+    ],
+    "/admin/upload-question-paper": [
+      "static/chunks/webpack.js",
+      "static/chunks/main.js",
+      "static/chunks/pages/admin/upload-question-paper.js"
+    ],
+    "/admin/uploads": [
+      "static/chunks/webpack.js",
+      "static/chunks/main.js",
+      "static/chunks/pages/admin/uploads.js"
     ],
     "/student/dashboard": [
       "static/chunks/webpack.js",
       "static/chunks/main.js",
       "static/chunks/pages/student/dashboard.js"
-    ],
-    "/student/search": [
-      "static/chunks/webpack.js",
-      "static/chunks/main.js",
-      "static/chunks/pages/student/search.js"
     ]
   },
   "ampFirstPages": []

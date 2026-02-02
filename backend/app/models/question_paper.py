@@ -32,9 +32,12 @@ class QuestionPaper(Base):
     exam_date = Column(DateTime, nullable=True)
     pdf_path = Column(String(500), nullable=True)  # Permanent storage path
     temp_pdf_path = Column(String(500), nullable=True)  # Temporary upload path
+    answer_key_path = Column(String(500), nullable=True)  # Optional answer key file path
+    content_type = Column(String(20), nullable=False, default="question_paper")  # "question_paper" | "answer_scheme"
     uploaded_by = Column(Integer, ForeignKey("users.user_id"), nullable=False)
     processing_status = Column(Enum(ProcessingStatus), default=ProcessingStatus.UPLOADED)
     processing_progress = Column(Float, default=0.0)  # 0-100%
+    processing_error_message = Column(String(1000), nullable=True)  # Last error when status is FAILED
     ocr_confidence = Column(Float, nullable=True)
     total_questions_extracted = Column(Integer, default=0)
     questions_in_review = Column(Integer, default=0)

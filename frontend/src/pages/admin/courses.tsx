@@ -58,6 +58,9 @@ export default function AdminCourses() {
   // Units to add during course creation
   const [courseUnitsToAdd, setCourseUnitsToAdd] = useState<Array<{unit_number: number, unit_name: string, topics: string}>>([])
   
+  // Units to add during course editing
+  const [editCourseUnitsToAdd, setEditCourseUnitsToAdd] = useState<Array<{unit_number: number, unit_name: string, topics: string}>>([])
+  
   // Unit management state
   const [showAddUnitModal, setShowAddUnitModal] = useState(false)
   const [showEditUnitModal, setShowEditUnitModal] = useState(false)
@@ -169,24 +172,16 @@ export default function AdminCourses() {
     setEditSyllabusFile(null)
     setEditAcademicYear('')
     setEditSemesterType('')
+    setEditCourseUnitsToAdd([])
     
-    // Try to fetch existing syllabus info
+    // Load existing units for this course
     try {
-      const response = await api.get('/api/admin/uploads', {
-        params: {
-          course_code: course.course_code,
-          file_type: 'syllabus',
-          limit: 1
-        }
-      })
-      if (response.data && response.data.length > 0) {
-        const syllabus = response.data[0]
-        setEditAcademicYear(syllabus.academic_year.toString())
-        setEditSemesterType(syllabus.semester_type)
-      }
+      const unitsResponse = await api.get(`/api/courses/${course.course_code}/units`)
+      // Don't populate editCourseUnitsToAdd with existing units - they're already managed separately
+      // This is just for adding NEW units during edit
     } catch (error) {
-      // If no syllabus exists, that's fine - fields will be empty
-      console.log('No existing syllabus found for course')
+      // If no units exist, that's fine
+      console.log('No existing units found for course')
     }
     
     setShowEditModal(true)
@@ -207,6 +202,7 @@ export default function AdminCourses() {
     setEditAcademicYear('')
     setEditSemesterType('')
     setCourseUnitsToAdd([])
+    setEditCourseUnitsToAdd([])
     if (editFileInputRef.current) {
       editFileInputRef.current.value = ''
     }
@@ -288,25 +284,43 @@ export default function AdminCourses() {
         if (formData.description !== (editingCourse.description || '')) {
           formDataToSend.append('description', formData.description)
         }
-        
-        // Add syllabus if provided
-        if (editSyllabusFile) {
-          if (!editAcademicYear || !editSemesterType) {
-            toast.error('Academic year and semester are required when updating syllabus')
-            setSubmitting(false)
-            return
-          }
-          formDataToSend.append('syllabus_file', editSyllabusFile)
-          formDataToSend.append('academic_year', editAcademicYear)
-          formDataToSend.append('semester_type', editSemesterType)
-        }
 
         const response = await api.put(`/api/courses/${editingCourse.course_code}`, formDataToSend, {
           headers: {
             'Content-Type': 'multipart/form-data'
           }
         })
-        toast.success(`Course ${editingCourse.course_code} updated successfully`)
+        
+        // Add units if any were provided
+        if (editCourseUnitsToAdd.length > 0) {
+          try {
+            const unitPromises = editCourseUnitsToAdd.map(unit => 
+              api.post(`/api/courses/${editingCourse.course_code}/units`, {
+                unit_number: unit.unit_number,
+                unit_name: unit.unit_name,
+                topics: unit.topics || null
+              })
+            )
+            await Promise.all(unitPromises)
+            toast.success(`Course ${editingCourse.course_code} updated successfully with ${editCourseUnitsToAdd.length} new unit(s)`)
+            
+            // Refresh units for this course
+            try {
+              const unitsResponse = await api.get(`/api/courses/${editingCourse.course_code}/units`)
+              setCourseUnits(prev => ({
+                ...prev,
+                [editingCourse.course_code]: unitsResponse.data
+              }))
+            } catch (error) {
+              // Silently fail - units will be loaded when course is expanded
+            }
+          } catch (error: any) {
+            toast.error(`Course updated but failed to add some units: ${error.response?.data?.detail || error.message}`)
+          }
+        } else {
+          toast.success(`Course ${editingCourse.course_code} updated successfully`)
+        }
+        
         // Update in list
         setCourses(prev => prev.map(c => 
           c.course_code === editingCourse.course_code ? response.data : c
@@ -911,78 +925,111 @@ export default function AdminCourses() {
                   />
                 </div>
 
-                {/* Syllabus Update Section - Optional */}
+                {/* Add Units Section */}
                 <div className="border-t border-gray-200 dark:border-gray-700 pt-4">
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                    Update Syllabus (Optional)
-                  </label>
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
-                    Leave empty to keep existing syllabus. Upload a new file to replace it.
-                  </p>
-                  <div className="space-y-3">
-                    <div>
-                      <input
-                        ref={editFileInputRef}
-                        type="file"
-                        id="edit_syllabus_file"
-                        accept=".pdf,.docx,.doc"
-                        onChange={(e) => {
-                          const file = e.target.files?.[0] || null
-                          setEditSyllabusFile(file)
-                        }}
-                        className="block w-full text-sm text-gray-500 dark:text-gray-400
-                          file:mr-4 file:py-2 file:px-4
-                          file:rounded-lg file:border-0
-                          file:text-sm file:font-semibold
-                          file:bg-primary-50 dark:file:bg-primary-900/20
-                          file:text-primary-700 dark:file:text-primary-300
-                          hover:file:bg-primary-100 dark:hover:file:bg-primary-900/30
-                          cursor-pointer
-                          dark:bg-gray-700 dark:text-white"
-                      />
-                      <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                        PDF or DOCX format
-                      </p>
-                    </div>
-                    {editSyllabusFile && (
-                      <div className="grid grid-cols-2 gap-4">
-                        <div>
-                          <label htmlFor="edit_academic_year" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                            Academic Year *
-                          </label>
-                          <select
-                            id="edit_academic_year"
-                            required={!!editSyllabusFile}
-                            className="input-field dark:bg-gray-700 dark:border-gray-600 dark:text-white"
-                            value={editAcademicYear}
-                            onChange={(e) => setEditAcademicYear(e.target.value)}
-                          >
-                            <option value="">Select Year</option>
-                            <option value="1">1st Year</option>
-                            <option value="2">2nd Year</option>
-                            <option value="3">3rd Year</option>
-                            <option value="4">4th Year</option>
-                          </select>
-                        </div>
-                        <div>
-                          <label htmlFor="edit_semester_type" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                            Semester *
-                          </label>
-                          <select
-                            id="edit_semester_type"
-                            required={!!editSyllabusFile}
-                            className="input-field dark:bg-gray-700 dark:border-gray-600 dark:text-white"
-                            value={editSemesterType}
-                            onChange={(e) => setEditSemesterType(e.target.value)}
-                          >
-                            <option value="">Select Semester</option>
-                            <option value="ODD">ODD</option>
-                            <option value="EVEN">EVEN</option>
-                          </select>
-                        </div>
-                      </div>
-                    )}
+                  <div className="flex items-center justify-between mb-3">
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                      Add New Units (Optional)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditCourseUnitsToAdd(prev => [...prev, {
+                          unit_number: prev.length + 1,
+                          unit_name: '',
+                          topics: ''
+                        }])
+                      }}
+                      className="text-sm text-primary-600 dark:text-primary-400 hover:text-primary-500 dark:hover:text-primary-300 flex items-center space-x-1"
+                    >
+                      <PlusIcon className="h-4 w-4" />
+                      <span>Add Unit</span>
+                    </button>
                   </div>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+                    Add new units with unit number, unit name, and topics. Existing units can be managed from the course list below.
+                  </p>
+                  
+                  {editCourseUnitsToAdd.length > 0 && (
+                    <div className="space-y-3">
+                      {editCourseUnitsToAdd.map((unit, index) => (
+                        <div key={index} className="p-3 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-gray-200 dark:border-gray-700">
+                          <div className="flex items-start justify-between mb-2">
+                            <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                              Unit {unit.unit_number}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditCourseUnitsToAdd(prev => prev.filter((_, i) => i !== index))
+                              }}
+                              className="text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300"
+                            >
+                              <XMarkIcon className="h-4 w-4" />
+                            </button>
+                          </div>
+                          <div className="space-y-2">
+                            <div className="grid grid-cols-3 gap-2">
+                              <div>
+                                <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">
+                                  Unit #
+                                </label>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  className="input-field dark:bg-gray-700 dark:border-gray-600 dark:text-white text-sm"
+                                  value={unit.unit_number}
+                                  onChange={(e) => {
+                                    const newUnits = [...editCourseUnitsToAdd]
+                                    newUnits[index].unit_number = parseInt(e.target.value) || 1
+                                    setEditCourseUnitsToAdd(newUnits)
+                                  }}
+                                />
+                              </div>
+                              <div className="col-span-2">
+                                <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">
+                                  Unit Name
+                                </label>
+                                <input
+                                  type="text"
+                                  className="input-field dark:bg-gray-700 dark:border-gray-600 dark:text-white text-sm"
+                                  value={unit.unit_name}
+                                  onChange={(e) => {
+                                    const newUnits = [...editCourseUnitsToAdd]
+                                    newUnits[index].unit_name = e.target.value
+                                    setEditCourseUnitsToAdd(newUnits)
+                                  }}
+                                  placeholder="e.g., Introduction to Database Systems"
+                                />
+                              </div>
+                            </div>
+                            <div>
+                              <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">
+                                Topics (comma-separated)
+                              </label>
+                              <textarea
+                                rows={2}
+                                className="input-field dark:bg-gray-700 dark:border-gray-600 dark:text-white text-sm"
+                                value={unit.topics}
+                                onChange={(e) => {
+                                  const newUnits = [...editCourseUnitsToAdd]
+                                  newUnits[index].topics = e.target.value
+                                  setEditCourseUnitsToAdd(newUnits)
+                                }}
+                                placeholder="e.g., Database concepts, Data models, DBMS architecture"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  
+                  {editCourseUnitsToAdd.length === 0 && (
+                    <p className="text-sm text-gray-500 dark:text-gray-400 italic">
+                      No new units to add. Click "Add Unit" to add units for this course.
+                    </p>
+                  )}
                 </div>
                 <div className="flex justify-end space-x-3 pt-4">
                   <button

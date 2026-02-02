@@ -8,7 +8,9 @@ import {
   BookmarkIcon, 
   TrashIcon,
   ArrowLeftIcon,
-  MagnifyingGlassIcon
+  MagnifyingGlassIcon,
+  ChevronDownIcon,
+  ChevronUpIcon
 } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 
@@ -18,6 +20,7 @@ interface Bookmark {
   question: {
     question_id: number
     question_text: string
+    answer_text?: string
     marks?: number
     bloom_level?: number
     bloom_category?: string
@@ -40,6 +43,7 @@ export default function StudentBookmarks() {
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([])
   const [loading, setLoading] = useState(true)
   const [searchQuery, setSearchQuery] = useState('')
+  const [openAnswers, setOpenAnswers] = useState<Record<number, boolean>>({})
 
   useEffect(() => {
     if (!user) {
@@ -212,6 +216,32 @@ export default function StudentBookmarks() {
                           <p className="text-sm text-gray-600 dark:text-gray-400">
                             <span className="font-medium">Notes:</span> {bookmark.notes}
                           </p>
+                        </div>
+                      )}
+                      {bookmark.question.answer_text && (
+                        <div className="mt-4 border-t border-gray-200 dark:border-gray-700 pt-4">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setOpenAnswers((prev) => ({
+                                ...prev,
+                                [bookmark.question.question_id]: !prev[bookmark.question.question_id],
+                              }))
+                            }
+                            className="flex items-center text-sm font-medium text-primary-600 dark:text-primary-400 hover:underline"
+                          >
+                            {openAnswers[bookmark.question.question_id] ? (
+                              <ChevronUpIcon className="h-4 w-4 mr-1" />
+                            ) : (
+                              <ChevronDownIcon className="h-4 w-4 mr-1" />
+                            )}
+                            Answer
+                          </button>
+                          {openAnswers[bookmark.question.question_id] && (
+                            <div className="mt-3 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap">
+                              {bookmark.question.answer_text}
+                            </div>
+                          )}
                         </div>
                       )}
                       <div className="mt-3 text-xs text-gray-500 dark:text-gray-400">

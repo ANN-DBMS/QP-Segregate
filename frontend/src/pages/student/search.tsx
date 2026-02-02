@@ -27,11 +27,14 @@ interface Question {
   academic_year: number
   semester_type: string
   exam_date?: string
+  paper_id?: number
   variant_count: number
   topic_tags?: string[]
   is_reviewed?: boolean
   review_status?: string
   image_path?: string
+  answer_text?: string
+  answer_assets?: { answer_asset_id: number; file_path: string; caption?: string | null; created_at?: string | null }[]
 }
 
 interface SearchFilters {
@@ -66,6 +69,7 @@ export default function StudentSearch() {
   const [totalResults, setTotalResults] = useState(0)
   const [currentPage, setCurrentPage] = useState(1)
   const [isInitialLoad, setIsInitialLoad] = useState(true)
+  const [openAnswers, setOpenAnswers] = useState<Record<number, boolean>>({})
 
   useEffect(() => {
     if (!user) {
@@ -621,6 +625,55 @@ export default function StudentSearch() {
                         </button>
                       </div>
                     </div>
+
+                    {(question.answer_text || (question.answer_assets && question.answer_assets.length > 0)) && (
+                      <div className="mt-4 border-t border-gray-200 dark:border-gray-700 pt-4">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setOpenAnswers((prev) => ({
+                              ...prev,
+                              [question.question_id]: !prev[question.question_id],
+                            }))
+                          }
+                          className="flex items-center text-sm font-medium text-primary-700 dark:text-primary-300 hover:underline"
+                        >
+                          {openAnswers[question.question_id] ? (
+                            <ChevronUpIcon className="h-4 w-4 mr-1" />
+                          ) : (
+                            <ChevronDownIcon className="h-4 w-4 mr-1" />
+                          )}
+                          Answer
+                        </button>
+
+                        {openAnswers[question.question_id] && (
+                          <div className="mt-3 text-sm text-gray-800 dark:text-gray-200 space-y-3">
+                            {question.answer_text && (
+                              <div className="whitespace-pre-wrap">{question.answer_text}</div>
+                            )}
+                            {question.answer_assets && question.answer_assets.length > 0 && (
+                              <div className="space-y-3">
+                                {question.answer_assets.map((asset) => (
+                                  <div key={asset.answer_asset_id}>
+                                    <img
+                                      src={`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/${asset.file_path}`}
+                                      alt={asset.caption || 'Answer image'}
+                                      className="max-w-full h-auto rounded-lg border border-gray-200 dark:border-gray-700"
+                                      onError={(e) => {
+                                        e.currentTarget.style.display = 'none'
+                                      }}
+                                    />
+                                    {asset.caption && (
+                                      <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{asset.caption}</div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ))}
               </>

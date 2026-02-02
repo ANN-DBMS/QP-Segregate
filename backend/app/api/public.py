@@ -5,6 +5,7 @@ from app.core.database import get_db
 from app.models.question import Question
 from app.models.question_paper import QuestionPaper
 from app.models.course import Course, CourseEquivalence
+from app.services.embedding_service import EmbeddingService
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -81,10 +82,22 @@ async def search_questions(
     if request.filters.get("year_to"):
         query = query.filter(QuestionPaper.academic_year <= request.filters["year_to"])
     
-    # TODO: Implement semantic search using embeddings
-    # For now, use text search
-    if request.query:
-        query = query.filter(Question.question_text.ilike(f"%{request.query}%"))
+    # Semantic search with keyword fallback
+    if request.query and request.query.strip():
+        qvec = None
+        try:
+            qvec = EmbeddingService.embed_text(request.query)
+        except Exception:
+            qvec = None
+
+        if qvec:
+            query = query.filter(Question.question_embedding.isnot(None)).order_by(
+                Question.question_embedding.cosine_distance(qvec)
+            )
+        else:
+            query = query.filter(Question.question_text.ilike(f"%{request.query}%"))
+    else:
+        query = query.order_by(Question.created_at.desc())
     
     # Pagination
     offset = (request.page - 1) * request.limit

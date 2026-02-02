@@ -8,8 +8,10 @@ import { useTheme } from '../hooks/useTheme'
 
 export default function Home() {
   const router = useRouter()
-  const { resolvedTheme } = useTheme()
+  const { resolvedTheme, mounted } = useTheme()
   const [userType, setUserType] = useState<'admin' | 'student' | null>(null)
+  // Use fixed logo until mounted so server and client first paint match (avoids hydration error)
+  const logoDark = mounted && resolvedTheme === 'dark'
 
   const handleLogin = (type: 'admin' | 'student') => {
     setUserType(type)
@@ -30,11 +32,12 @@ export default function Home() {
             <div className="flex justify-between items-center py-6">
               <div className="flex items-center space-x-4">
                 <Image
-                  src={resolvedTheme === 'dark' ? '/RVlogodark.png' : '/RVlogolight.png'}
+                  src={logoDark ? '/RVlogodark.png' : '/RVlogolight.png'}
                   alt="RVCE Logo"
                   width={80}
                   height={80}
                   className="h-auto"
+                  style={{ width: 'auto', height: 'auto' }}
                   priority
                 />
                 <Image
@@ -43,6 +46,7 @@ export default function Home() {
                   width={200}
                   height={60}
                   className="h-auto"
+                  style={{ width: 'auto', height: 'auto' }}
                   priority
                 />
               </div>

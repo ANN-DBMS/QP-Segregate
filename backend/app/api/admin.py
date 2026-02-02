@@ -6,14 +6,15 @@ from datetime import datetime
 import os
 import shutil
 import sys
-from app.core.database import get_db
+from app.core.database import get_db, SessionLocal
 from app.models.user import User
 from app.models.question_paper import QuestionPaper, ProcessingStatus, ExamType, SemesterType
-from app.models.question import Question, ReviewQueue, ReviewStatus, BloomLevel, BloomCategory
+from app.models.question import Question, ReviewQueue, ReviewStatus, BloomLevel, BloomCategory, AnswerAsset
 from app.models.course import Course
 from app.api.auth import get_current_user
 from app.services.ocr_service import OCRService
 from app.services.classification_service import ClassificationService
+from app.services.embedding_service import EmbeddingService
 from app.tasks.processing import process_question_paper
 from pydantic import BaseModel, field_validator
 
@@ -35,6 +36,7 @@ class MetadataSubmitRequest(BaseModel):
     exam_type: Optional[str] = None  # Optional for syllabus
     exam_date: Optional[datetime] = None
     file_type: Optional[str] = "question_paper"  # 'question_paper' or 'syllabus'
+    content_type: Optional[str] = "question_paper"  # 'question_paper' (questions only) or 'answer_scheme' (questions with answers)
     
     @field_validator('exam_date', mode='before')
     @classmethod
@@ -63,6 +65,7 @@ class ProcessingStatusResponse(BaseModel):
     progress: float
     questions_extracted: int
     errors: List[str] = []
+    error_message: Optional[str] = None  # When status is FAILED, reason from backend
 
 class ReviewQueueItem(BaseModel):
     review_id: int
@@ -99,6 +102,12 @@ class QuestionUpdateRequest(BaseModel):
     bloom_taxonomy_level: Optional[int] = None
     bloom_category: Optional[str] = None
     question_text: Optional[str] = None
+
+class AnswerUpdateRequest(BaseModel):
+    answer_text: Optional[str] = None
+
+class VariantParentUpdateRequest(BaseModel):
+    parent_question_id: Optional[int] = None
 
 def convert_docx_to_pdf(docx_path: str) -> str:
     """Convert DOCX file to PDF (optional - for storage purposes)"""
@@ -322,6 +331,67 @@ async def upload_pdf_legacy(
     """Legacy endpoint - redirects to upload-file"""
     return await upload_file(file, "question_paper", current_user)
 
+def _run_question_paper_processing(paper_id: int) -> None:
+    """Background task: run processing steps and update progress for polling."""
+    from app.tasks.processing import (
+        extract_questions_from_paper,
+        classify_questions_with_llm,
+        detect_duplicates,
+        save_questions,
+    )
+    import logging
+    logger = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        paper = db.query(QuestionPaper).filter(QuestionPaper.paper_id == paper_id).first()
+        if not paper:
+            logger.error(f"Paper {paper_id} not found for background processing")
+            return
+        paper.processing_status = ProcessingStatus.PROCESSING
+        paper.processing_progress = 0
+        db.commit()
+
+        paper.processing_progress = 10
+        db.commit()
+        paper.processing_progress = 30
+        db.commit()
+        questions = extract_questions_from_paper(paper)
+
+        paper.processing_progress = 50
+        db.commit()
+        classified_questions = classify_questions_with_llm(questions, paper.course_code, db)
+
+        paper.processing_progress = 70
+        db.commit()
+        deduplicated_questions = detect_duplicates(classified_questions, paper.course_code)
+
+        paper.processing_progress = 90
+        db.commit()
+        save_questions(deduplicated_questions, paper, db)
+
+        paper.processing_status = ProcessingStatus.COMPLETED
+        paper.processing_progress = 100
+        paper.total_questions_extracted = len(deduplicated_questions)
+        db.commit()
+        logger.info(f"Background processing completed for paper {paper_id}")
+    except Exception as e:
+        err_msg = str(e)
+        if len(err_msg) > 1000:
+            err_msg = err_msg[:997] + "..."
+        logger.error(f"Failed to process question paper {paper_id}: {err_msg}", exc_info=True)
+        try:
+            paper = db.query(QuestionPaper).filter(QuestionPaper.paper_id == paper_id).first()
+            if paper:
+                paper.processing_status = ProcessingStatus.FAILED
+                paper.processing_progress = 0
+                paper.processing_error_message = err_msg
+                db.commit()
+        except Exception:
+            db.rollback()
+    finally:
+        db.close()
+
+
 @router.post("/submit-metadata")
 async def submit_metadata(
     request: MetadataSubmitRequest,
@@ -375,6 +445,9 @@ async def submit_metadata(
     elif request.file_type == "question_paper":
         raise HTTPException(status_code=400, detail="Exam type is required for question papers")
     
+    content_type = (request.content_type or "question_paper").strip().lower()
+    if content_type not in ("question_paper", "answer_scheme"):
+        content_type = "question_paper"
     paper = QuestionPaper(
         course_code=request.course_code,
         academic_year=request.academic_year,
@@ -383,6 +456,7 @@ async def submit_metadata(
         exam_date=request.exam_date,
         pdf_path=permanent_path,
         temp_pdf_path=temp_path,
+        content_type=content_type,
         uploaded_by=current_user.user_id,
         processing_status=ProcessingStatus.METADATA_PENDING,
         file_size=os.path.getsize(permanent_path)
@@ -401,83 +475,12 @@ async def submit_metadata(
         db.commit()
         task_id = None
     else:
-        # Process question paper immediately (synchronously)
-        try:
-            # Import processing functions
-            from app.tasks.processing import (
-                convert_file_for_llm,
-                extract_questions_with_llm,
-                classify_questions_with_llm,
-                detect_duplicates,
-                save_questions
-            )
-            
-            # Update status to processing
-            paper.processing_status = ProcessingStatus.PROCESSING
-            paper.processing_progress = 0
-            db.commit()
-            
-            # Step 1: File Conversion (PDF/DOCX to text/images)
-            paper.processing_progress = 10
-            db.commit()
-            file_content = convert_file_for_llm(paper)
-            
-            # Step 2: LLM Question Extraction
-            paper.processing_progress = 30
-            db.commit()
-            questions = extract_questions_with_llm(file_content)
-            
-            # Step 3: LLM Classification (units and topic tags)
-            paper.processing_progress = 50
-            db.commit()
-            classified_questions = classify_questions_with_llm(questions, paper.course_code, db)
-            
-            # Step 4: Duplicate Detection (simplified - paper-level duplicates already checked at upload)
-            paper.processing_progress = 70
-            db.commit()
-            # Simple duplicate detection - just marks questions as canonical
-            # Paper-level duplicate checking (same course, exam type, date) is done in submit_metadata
-            deduplicated_questions = detect_duplicates(classified_questions, paper.course_code)
-            
-            # Step 5: Save to Database
-            paper.processing_progress = 90
-            db.commit()
-            
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.info(f"About to save {len(deduplicated_questions)} questions for paper {paper.paper_id}")
-            if deduplicated_questions:
-                logger.info(f"Sample question data: {deduplicated_questions[0]}")
-            
-            save_questions(deduplicated_questions, paper, db)
-            
-            # Verify questions were saved
-            saved_questions_count = db.query(Question).filter(Question.paper_id == paper.paper_id).count()
-            logger.info(f"Total questions in database for paper {paper.paper_id}: {saved_questions_count}")
-            
-            # Update paper status to completed
-            paper.processing_status = ProcessingStatus.COMPLETED
-            paper.processing_progress = 100
-            paper.total_questions_extracted = len(deduplicated_questions)
-            db.commit()
-            
-            task_id = None  # No Celery task ID for synchronous processing
-            
-        except Exception as e:
-            # Update paper status to failed
-            paper.processing_status = ProcessingStatus.FAILED
-            paper.processing_progress = 0
-            db.commit()
-            
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Failed to process question paper {paper.paper_id}: {str(e)}", exc_info=True)
-            
-            # Re-raise the exception so the API returns an error
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to process question paper: {str(e)}"
-            )
+        # Question paper: start processing in background so frontend can poll progress
+        paper.processing_status = ProcessingStatus.PROCESSING
+        paper.processing_progress = 0
+        db.commit()
+        background_tasks.add_task(_run_question_paper_processing, paper.paper_id)
+        task_id = None
     
     # Log activity
     from app.utils.activity_logger import log_activity
@@ -512,11 +515,13 @@ async def get_processing_status(
     if not paper:
         raise HTTPException(status_code=404, detail="Question paper not found")
     
+    error_message = getattr(paper, "processing_error_message", None) if paper.processing_status == ProcessingStatus.FAILED else None
     return ProcessingStatusResponse(
         paper_id=paper.paper_id,
         status=paper.processing_status.value,
         progress=paper.processing_progress,
-        questions_extracted=paper.total_questions_extracted
+        questions_extracted=paper.total_questions_extracted,
+        error_message=error_message
     )
 
 @router.post("/retry-processing/{paper_id}")
@@ -607,10 +612,23 @@ async def search_questions(
         elif review_status == "non-reviewed":
             query = query.filter(Question.is_reviewed == False)
     
-    # Text search
+    # Semantic search (optional) with keyword fallback
     search_query = request.get("query", "").strip()
     if search_query:
-        query = query.filter(Question.question_text.ilike(f"%{search_query}%"))
+        qvec = None
+        try:
+            qvec = EmbeddingService.embed_text(search_query)
+        except Exception:
+            qvec = None
+
+        if qvec:
+            query = query.filter(Question.question_embedding.isnot(None)).order_by(
+                Question.question_embedding.cosine_distance(qvec)
+            )
+        else:
+            query = query.filter(Question.question_text.ilike(f"%{search_query}%"))
+    else:
+        query = query.order_by(Question.created_at.desc())
     
     # Pagination
     page = request.get("page", 1)
@@ -634,6 +652,7 @@ async def search_questions(
         results.append({
             "question_id": q.question_id,
             "question_text": q.question_text,
+            "answer_text": q.answer_text,
             "marks": q.marks,
             "bloom_level": q.bloom_level.value if q.bloom_level else None,
             "bloom_category": q.bloom_category.value if q.bloom_category else None,
@@ -921,6 +940,15 @@ async def get_question(
         except:
             topic_tags = None
     
+    answer_assets = []
+    for asset in getattr(question, "answer_assets", []) or []:
+        answer_assets.append({
+            "answer_asset_id": asset.answer_asset_id,
+            "file_path": asset.file_path,
+            "caption": asset.caption,
+            "created_at": asset.created_at.isoformat() if asset.created_at else None,
+        })
+
     return {
         "question_id": question.question_id,
         "question_text": question.question_text,
@@ -935,6 +963,10 @@ async def get_question(
         "is_reviewed": question.is_reviewed,
         "review_status": question.review_status.value if question.review_status else None,
         "image_path": question.image_path,
+        "answer_text": question.answer_text,
+        "answer_assets": answer_assets,
+        "parent_question_id": question.parent_question_id,
+        "similarity_score": question.similarity_score,
         "paper_id": question.paper_id
     }
 
@@ -964,6 +996,11 @@ async def update_question(
         question.bloom_category = BloomCategory(request.bloom_category)
     if request.question_text is not None:
         question.question_text = request.question_text
+        # Update semantic embedding when question text changes
+        try:
+            question.question_embedding = EmbeddingService.embed_text(question.question_text)
+        except Exception:
+            pass
     if request.topic_tags is not None:
         import json
         question.topic_tags = json.dumps(request.topic_tags)
@@ -1037,6 +1074,237 @@ async def upload_question_image(
     )
     
     return {"message": "Image uploaded successfully", "image_path": image_path}
+
+
+@router.put("/questions/{question_id}/answer")
+async def update_question_answer(
+    question_id: int,
+    request: AnswerUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Update the answer text for a question (optional feature)."""
+    if current_user.role != "ADMIN":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    question = db.query(Question).filter(Question.question_id == question_id).first()
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    question.answer_text = request.answer_text
+    db.commit()
+
+    from app.utils.activity_logger import log_activity
+    log_activity(
+        db=db,
+        user_id=current_user.user_id,
+        activity_type="ANSWER_UPDATED",
+        description=f"Updated answer for question {question_id}",
+        entity_type="question",
+        entity_id=str(question_id),
+        metadata={"question_id": question_id, "has_answer_text": bool(request.answer_text)}
+    )
+
+    return {"message": "Answer updated successfully", "question_id": question_id}
+
+
+@router.put("/questions/{question_id}/variant-parent")
+async def update_variant_parent(
+    question_id: int,
+    request: VariantParentUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Override/clear the variant parent for a question (manual grouping control)."""
+    if current_user.role != "ADMIN":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    question = db.query(Question).filter(Question.question_id == question_id).first()
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    if request.parent_question_id:
+        parent = db.query(Question).filter(Question.question_id == request.parent_question_id).first()
+        if not parent:
+            raise HTTPException(status_code=404, detail="Parent question not found")
+        if parent.course_code != question.course_code:
+            raise HTTPException(status_code=400, detail="Parent question must be in the same course")
+
+        # If parent itself is a variant, link to its canonical parent
+        canonical_parent_id = parent.parent_question_id or parent.question_id
+        question.parent_question_id = canonical_parent_id
+        question.is_canonical = False
+    else:
+        # Clear parent (make canonical)
+        question.parent_question_id = None
+        question.is_canonical = True
+        question.similarity_score = None
+
+    db.commit()
+
+    from app.utils.activity_logger import log_activity
+    log_activity(
+        db=db,
+        user_id=current_user.user_id,
+        activity_type="VARIANT_PARENT_UPDATED",
+        description=f"Updated variant parent for question {question_id}",
+        entity_type="question",
+        entity_id=str(question_id),
+        metadata={"question_id": question_id, "parent_question_id": question.parent_question_id},
+    )
+
+    return {
+        "message": "Variant parent updated successfully",
+        "question_id": question_id,
+        "parent_question_id": question.parent_question_id,
+        "is_canonical": question.is_canonical,
+    }
+
+
+@router.post("/questions/{question_id}/answer/assets")
+async def upload_answer_asset(
+    question_id: int,
+    file: UploadFile = File(...),
+    caption: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Upload an answer image/asset for a question (supports multiple)."""
+    if current_user.role != "ADMIN":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    question = db.query(Question).filter(Question.question_id == question_id).first()
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+
+    answer_assets_dir = os.path.join("storage", "answer_assets", str(question_id))
+    os.makedirs(answer_assets_dir, exist_ok=True)
+
+    file_ext = os.path.splitext(file.filename)[1] or ".png"
+    safe_name = f"answer_{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}{file_ext}"
+    asset_path = os.path.join(answer_assets_dir, safe_name)
+
+    with open(asset_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    asset = AnswerAsset(question_id=question_id, file_path=asset_path, caption=caption)
+    db.add(asset)
+    db.commit()
+    db.refresh(asset)
+
+    from app.utils.activity_logger import log_activity
+    log_activity(
+        db=db,
+        user_id=current_user.user_id,
+        activity_type="ANSWER_ASSET_UPLOADED",
+        description=f"Uploaded answer asset for question {question_id}",
+        entity_type="question",
+        entity_id=str(question_id),
+        metadata={"question_id": question_id, "file_path": asset_path}
+    )
+
+    return {
+        "message": "Answer asset uploaded successfully",
+        "answer_asset": {
+            "answer_asset_id": asset.answer_asset_id,
+            "file_path": asset.file_path,
+            "caption": asset.caption,
+            "created_at": asset.created_at.isoformat() if asset.created_at else None,
+        },
+    }
+
+
+@router.delete("/questions/{question_id}/answer/assets/{asset_id}")
+async def delete_answer_asset(
+    question_id: int,
+    asset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete an answer asset for a question."""
+    if current_user.role != "ADMIN":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    asset = db.query(AnswerAsset).filter(
+        AnswerAsset.answer_asset_id == asset_id,
+        AnswerAsset.question_id == question_id,
+    ).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Answer asset not found")
+
+    file_path = asset.file_path
+    db.delete(asset)
+    db.commit()
+
+    # Best-effort delete file from disk
+    try:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+    except Exception:
+        pass
+
+    from app.utils.activity_logger import log_activity
+    log_activity(
+        db=db,
+        user_id=current_user.user_id,
+        activity_type="ANSWER_ASSET_DELETED",
+        description=f"Deleted answer asset {asset_id} for question {question_id}",
+        entity_type="question",
+        entity_id=str(question_id),
+        metadata={"question_id": question_id, "asset_id": asset_id}
+    )
+
+    return {"message": "Answer asset deleted successfully"}
+
+
+@router.post("/papers/{paper_id}/answer-key")
+async def upload_answer_key(
+    paper_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Upload/replace an optional answer key file for a question paper."""
+    if current_user.role != "ADMIN":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    paper = db.query(QuestionPaper).filter(QuestionPaper.paper_id == paper_id).first()
+    if not paper:
+        raise HTTPException(status_code=404, detail="Question paper not found")
+
+    # Allow PDF/DOC/DOCX
+    filename = (file.filename or "").lower()
+    if not (filename.endswith(".pdf") or filename.endswith(".docx") or filename.endswith(".doc")):
+        raise HTTPException(status_code=400, detail="Answer key must be a PDF or DOC/DOCX file")
+
+    answer_key_dir = os.path.join("storage", "answer_keys", str(paper_id))
+    os.makedirs(answer_key_dir, exist_ok=True)
+
+    file_ext = os.path.splitext(file.filename)[1] or ".pdf"
+    key_filename = f"answer_key{file_ext}"
+    key_path = os.path.join(answer_key_dir, key_filename)
+
+    with open(key_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    paper.answer_key_path = key_path
+    db.commit()
+
+    from app.utils.activity_logger import log_activity
+    log_activity(
+        db=db,
+        user_id=current_user.user_id,
+        activity_type="ANSWER_KEY_UPLOADED",
+        description=f"Uploaded answer key for paper {paper_id}",
+        entity_type="paper",
+        entity_id=str(paper_id),
+        metadata={"paper_id": paper_id, "answer_key_path": key_path}
+    )
+
+    return {"message": "Answer key uploaded successfully", "answer_key_path": key_path}
 
 @router.post("/questions/{question_id}/approve")
 async def approve_question_direct(
@@ -1193,6 +1461,8 @@ class PaperResponse(BaseModel):
     exam_type: str
     exam_date: Optional[datetime] = None
     pdf_path: Optional[str] = None
+    answer_key_path: Optional[str] = None
+    content_type: str = "question_paper"  # "question_paper" | "answer_scheme"
     uploaded_by: int
     uploader_username: Optional[str] = None
     processing_status: str
@@ -1256,6 +1526,7 @@ async def get_all_uploads(
             exam_type=paper.exam_type.value,
             exam_date=paper.exam_date,
             pdf_path=paper.pdf_path,
+            answer_key_path=getattr(paper, "answer_key_path", None),
             uploaded_by=paper.uploaded_by,
             uploader_username=paper.uploader.username if paper.uploader else None,
             processing_status=paper.processing_status.value,
@@ -1297,6 +1568,7 @@ async def get_upload(
         exam_type=paper.exam_type.value,
         exam_date=paper.exam_date,
         pdf_path=paper.pdf_path,
+        answer_key_path=getattr(paper, "answer_key_path", None),
         uploaded_by=paper.uploaded_by,
         uploader_username=paper.uploader.username if paper.uploader else None,
         processing_status=paper.processing_status.value,
@@ -1340,6 +1612,7 @@ async def get_paper_questions(
             "question_id": q.question_id,
             "question_number": q.question_number,
             "question_text": q.question_text,
+            "answer_text": q.answer_text,
             "marks": q.marks,
             "bloom_level": q.bloom_level.value if q.bloom_level else None,
             "bloom_category": q.bloom_category.value if q.bloom_category else None,
@@ -1434,6 +1707,7 @@ async def update_upload(
         exam_type=paper.exam_type.value,
         exam_date=paper.exam_date,
         pdf_path=paper.pdf_path,
+        answer_key_path=getattr(paper, "answer_key_path", None),
         uploaded_by=paper.uploaded_by,
         uploader_username=paper.uploader.username if paper.uploader else None,
         processing_status=paper.processing_status.value,
@@ -1461,8 +1735,14 @@ async def delete_upload(
     course_code = paper.course_code
     pdf_path = paper.pdf_path
     
+    # Delete review_queue entries that reference this paper's questions (FK constraint)
+    db.query(ReviewQueue).filter(
+        ReviewQueue.question_id.in_(
+            db.query(Question.question_id).filter(Question.paper_id == paper_id)
+        )
+    ).delete(synchronize_session=False)
+    
     # Delete associated questions
-    from app.models.question import Question
     db.query(Question).filter(Question.paper_id == paper_id).delete()
     
     # Delete the paper

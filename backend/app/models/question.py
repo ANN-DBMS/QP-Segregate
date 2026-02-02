@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.core.database import Base
 import enum
+from pgvector.sqlalchemy import Vector
 
 class BloomLevel(int, enum.Enum):
     REMEMBER = 1
@@ -51,8 +52,10 @@ class Question(Base):
     has_subparts = Column(Boolean, default=False)
     has_mathematical_notation = Column(Boolean, default=False)
     image_path = Column(String(500), nullable=True)  # Cropped question image
+    answer_text = Column(Text, nullable=True)  # Optional answer text (editable by admin)
     page_number = Column(Integer, nullable=True)
     topic_tags = Column(Text, nullable=True)  # JSON string array of topic tags
+    question_embedding = Column(Vector(384), nullable=True)  # sentence-transformers embedding
     is_reviewed = Column(Boolean, default=False)
     review_status = Column(Enum(ReviewStatus), default=ReviewStatus.PENDING)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -66,6 +69,23 @@ class Question(Base):
     variants = relationship("Question", back_populates="parent_question")
     bookmarks = relationship("StudentBookmark", back_populates="question")
     review_entries = relationship("ReviewQueue", back_populates="question")
+    answer_assets = relationship("AnswerAsset", back_populates="question", cascade="all, delete-orphan")
+
+
+class AnswerAsset(Base):
+    """
+    Stores answer images/assets for a question.
+    Supports multiple images per answer.
+    """
+    __tablename__ = "answer_assets"
+
+    answer_asset_id = Column(Integer, primary_key=True, index=True)
+    question_id = Column(Integer, ForeignKey("questions.question_id"), nullable=False, index=True)
+    file_path = Column(String(500), nullable=False)
+    caption = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    question = relationship("Question", back_populates="answer_assets")
 
 class ReviewQueue(Base):
     __tablename__ = "review_queue"

@@ -21,6 +21,7 @@ interface UploadState {
   taskId?: string
   progress?: number
   status?: string
+  errorMessage?: string
 }
 
 interface Course {
@@ -36,6 +37,7 @@ export default function UploadQuestionPaper() {
   const router = useRouter()
   const [uploadState, setUploadState] = useState<UploadState>({ step: 'upload' })
   const [metadata, setMetadata] = useState({
+    content_type: 'question_paper' as 'question_paper' | 'answer_scheme',
     course_code: '',
     academic_year: '',
     semester_type: '',
@@ -126,6 +128,7 @@ export default function UploadQuestionPaper() {
       const payload: any = {
         upload_id: uploadState.uploadId,
         file_type: 'question_paper',
+        content_type: metadata.content_type,
         ...metadata
       }
       // Only include exam_date if it has a value
@@ -145,47 +148,30 @@ export default function UploadQuestionPaper() {
       const response = await api.post('/api/admin/submit-metadata', payload)
 
       const result = response.data
-      
-      // Processing is now synchronous, so check final status
-      try {
-        const statusResponse = await api.get(`/api/admin/processing-status/${result.paper_id}`)
-        const status = statusResponse.data
-        
-        if (status.status === 'COMPLETED') {
-          setUploadState({
-            ...uploadState,
-            step: 'completed',
-            paperId: result.paper_id,
-            progress: 100
-          })
-          toast.success('Processing completed!', { id: 'processing' })
-        } else if (status.status === 'FAILED') {
-          setUploadState({
-            ...uploadState,
-            step: 'processing',
-            paperId: result.paper_id,
-            progress: 0
-          })
-          toast.error('Processing failed', { id: 'processing' })
-        } else {
-          // If still processing, start polling (fallback)
-          setUploadState({
-            ...uploadState,
-            step: 'processing',
-            paperId: result.paper_id,
-            taskId: result.task_id
-          })
-          pollProcessingStatus(result.paper_id)
+      const paperId = result.paper_id
+
+      // Optional: upload answer key after paper is created
+      if (answerKeyFile && paperId) {
+        try {
+          const answerKeyForm = new FormData()
+          answerKeyForm.append('file', answerKeyFile)
+          await api.post(`/api/admin/papers/${paperId}/answer-key`, answerKeyForm)
+          toast.success('Answer key uploaded')
+        } catch (akErr: any) {
+          console.error('Failed to upload answer key:', akErr)
+          toast.error('Failed to upload answer key (paper upload still succeeded)')
         }
-      } catch (statusError) {
-        // If we can't get status, assume it completed
-        setUploadState({
-          ...uploadState,
-          step: 'completed',
-          paperId: result.paper_id
-        })
-        toast.success('Question paper uploaded and processed!', { id: 'processing' })
       }
+
+      // Processing runs in background; show progress and poll until done
+      setUploadState({
+        ...uploadState,
+        step: 'processing',
+        paperId,
+        progress: 0,
+        status: 'PROCESSING'
+      })
+      pollProcessingStatus(paperId)
     } catch (error) {
       toast.error('Failed to submit metadata')
     } finally {
@@ -222,12 +208,18 @@ export default function UploadQuestionPaper() {
         }))
 
         if (status.status === 'COMPLETED') {
-          setUploadState(prev => ({ ...prev, step: 'completed' }))
+          setUploadState(prev => ({ ...prev, step: 'completed', progress: 100 }))
           clearInterval(pollInterval)
-          toast.success('Processing completed!')
+          toast.success('Processing completed!', { id: 'processing' })
         } else if (status.status === 'FAILED') {
+          setUploadState(prev => ({
+            ...prev,
+            step: 'completed',
+            status: 'FAILED',
+            errorMessage: status.error_message || undefined
+          }))
           clearInterval(pollInterval)
-          toast.error('Processing failed')
+          toast.error('Processing failed', { id: 'processing' })
         } else if (status.status === 'METADATA_PENDING' && pollCount > 10) {
           // If still in METADATA_PENDING after 20 seconds, Celery might not be running
           clearInterval(pollInterval)
@@ -245,7 +237,7 @@ export default function UploadQuestionPaper() {
           setUploadState(prev => ({ ...prev, step: 'completed' }))
         }
       }
-    }, 2000)
+    }, 1000)
   }
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
@@ -340,6 +332,39 @@ export default function UploadQuestionPaper() {
 
               <form onSubmit={handleMetadataSubmit} className="space-y-6">
                 <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+                  <div className="sm:col-span-2">
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      What type of document is this? *
+                    </label>
+                    <div className="flex flex-wrap gap-4">
+                      <label className="inline-flex items-center cursor-pointer">
+                        <input
+                          type="radio"
+                          name="content_type"
+                          value="question_paper"
+                          checked={metadata.content_type === 'question_paper'}
+                          onChange={() => setMetadata(m => ({ ...m, content_type: 'question_paper' }))}
+                          className="rounded border-gray-300 text-primary-600 focus:ring-primary-500 dark:border-gray-600 dark:bg-gray-700"
+                        />
+                        <span className="ml-2 text-sm text-gray-700 dark:text-gray-300">Question paper only</span>
+                      </label>
+                      <label className="inline-flex items-center cursor-pointer">
+                        <input
+                          type="radio"
+                          name="content_type"
+                          value="answer_scheme"
+                          checked={metadata.content_type === 'answer_scheme'}
+                          onChange={() => setMetadata(m => ({ ...m, content_type: 'answer_scheme' }))}
+                          className="rounded border-gray-300 text-primary-600 focus:ring-primary-500 dark:border-gray-600 dark:bg-gray-700"
+                        />
+                        <span className="ml-2 text-sm text-gray-700 dark:text-gray-300">Answer scheme (questions with answers)</span>
+                      </label>
+                    </div>
+                    <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                      Choose &quot;Answer scheme&quot; if the document contains both questions and their answers.
+                    </p>
+                  </div>
+
                   <div>
                     <label htmlFor="course_code" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
                       Course Code *
@@ -465,53 +490,119 @@ export default function UploadQuestionPaper() {
 
               <div className="space-y-4">
                 <div className="flex items-center">
-                  <CheckCircleIcon className="h-5 w-5 text-green-600 dark:text-green-500 mr-3" />
+                  <CheckCircleIcon className="h-5 w-5 text-green-600 dark:text-green-500 mr-3 flex-shrink-0" />
                   <span className="text-sm text-gray-600 dark:text-gray-300">PDF Uploaded</span>
                 </div>
 
                 <div className="flex items-center">
-                  <CheckCircleIcon className="h-5 w-5 text-green-600 dark:text-green-500 mr-3" />
-                  <span className="text-sm text-gray-600 dark:text-gray-300">OCR Extraction</span>
+                  {(uploadState.progress ?? 0) >= 10 ? (
+                    <CheckCircleIcon className="h-5 w-5 text-green-600 dark:text-green-500 mr-3 flex-shrink-0" />
+                  ) : (
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-primary-600 dark:border-primary-400 mr-3 flex-shrink-0"></div>
+                  )}
+                  <span className="text-sm text-gray-600 dark:text-gray-300">
+                    {(uploadState.progress ?? 0) >= 10 ? 'OCR Extraction' : 'OCR Extraction...'}
+                  </span>
                 </div>
 
                 <div className="flex items-center">
-                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-primary-600 dark:border-primary-400 mr-3"></div>
-                  <span className="text-sm text-gray-600 dark:text-gray-300">Classifying Questions...</span>
+                  {(uploadState.progress ?? 0) >= 50 ? (
+                    <CheckCircleIcon className="h-5 w-5 text-green-600 dark:text-green-500 mr-3 flex-shrink-0" />
+                  ) : (
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-primary-600 dark:border-primary-400 mr-3 flex-shrink-0"></div>
+                  )}
+                  <span className="text-sm text-gray-600 dark:text-gray-300">
+                    {(uploadState.progress ?? 0) >= 50 ? 'Classifying Questions' : 'Classifying Questions...'}
+                  </span>
                 </div>
 
                 <div className="flex items-center">
-                  <div className="h-5 w-5 border-2 border-gray-300 dark:border-gray-600 rounded mr-3"></div>
-                  <span className="text-sm text-gray-600 dark:text-gray-300">Duplicate Detection Pending</span>
+                  {(uploadState.progress ?? 0) >= 70 ? (
+                    <CheckCircleIcon className="h-5 w-5 text-green-600 dark:text-green-500 mr-3 flex-shrink-0" />
+                  ) : (uploadState.progress ?? 0) >= 50 ? (
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-primary-600 dark:border-primary-400 mr-3 flex-shrink-0"></div>
+                  ) : (
+                    <div className="h-5 w-5 border-2 border-gray-300 dark:border-gray-600 rounded mr-3 flex-shrink-0"></div>
+                  )}
+                  <span className="text-sm text-gray-600 dark:text-gray-300">
+                    {(uploadState.progress ?? 0) >= 70 ? 'Duplicate Detection' : (uploadState.progress ?? 0) >= 50 ? 'Duplicate Detection...' : 'Duplicate Detection Pending'}
+                  </span>
                 </div>
 
-                {uploadState.progress !== undefined && (
-                  <div className="mt-4">
-                    <div className="flex justify-between text-sm text-gray-600 dark:text-gray-300 mb-2">
-                      <span>Progress</span>
-                      <span>{Math.round(uploadState.progress)}%</span>
-                    </div>
-                    <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
-                      <div
-                        className="bg-primary-600 dark:bg-primary-500 h-2 rounded-full transition-all duration-300"
-                        style={{ width: `${uploadState.progress}%` }}
-                      ></div>
-                    </div>
+                <div className="flex items-center">
+                  {(uploadState.progress ?? 0) >= 100 ? (
+                    <CheckCircleIcon className="h-5 w-5 text-green-600 dark:text-green-500 mr-3 flex-shrink-0" />
+                  ) : (uploadState.progress ?? 0) >= 70 ? (
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-primary-600 dark:border-primary-400 mr-3 flex-shrink-0"></div>
+                  ) : (
+                    <div className="h-5 w-5 border-2 border-gray-300 dark:border-gray-600 rounded mr-3 flex-shrink-0"></div>
+                  )}
+                  <span className="text-sm text-gray-600 dark:text-gray-300">
+                    {(uploadState.progress ?? 0) >= 100 ? 'Saving to database' : (uploadState.progress ?? 0) >= 70 ? 'Saving to database...' : 'Saving to database Pending'}
+                  </span>
+                </div>
+
+                <div className="mt-4">
+                  <div className="flex justify-between text-sm text-gray-600 dark:text-gray-300 mb-2">
+                    <span>Progress</span>
+                    <span>{Math.round(uploadState.progress ?? 0)}%</span>
                   </div>
-                )}
+                  <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5">
+                    <div
+                      className="bg-primary-600 dark:bg-primary-500 h-2.5 rounded-full transition-all duration-500 ease-out"
+                      style={{ width: `${uploadState.progress ?? 0}%` }}
+                    />
+                  </div>
+                </div>
               </div>
             </div>
           )}
 
-          {/* Step 4: Completed */}
+          {/* Step 4: Completed (or Failed) */}
           {uploadState.step === 'completed' && (
             <div className="card dark:bg-gray-800 dark:border-gray-700">
               <div className="text-center">
-                <CheckCircleIcon className="h-16 w-16 text-green-600 dark:text-green-500 mx-auto mb-4" />
-                <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">Processing Completed!</h2>
-                <p className="text-gray-600 dark:text-gray-300 mb-6">
-                  Your question paper has been successfully processed and added to the database.
-                </p>
-                <div className="flex justify-center space-x-4">
+                {uploadState.status === 'FAILED' ? (
+                  <>
+                    <div className="h-16 w-16 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center mx-auto mb-4">
+                      <span className="text-3xl text-red-600 dark:text-red-400">!</span>
+                    </div>
+                    <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">Processing Failed</h2>
+                    <p className="text-gray-600 dark:text-gray-300 mb-4">
+                      Something went wrong while processing the question paper. You can try uploading again or check the activity log for details.
+                    </p>
+                    {uploadState.errorMessage && (
+                      <div className="mb-4 mx-auto max-w-lg text-left">
+                        <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Error details:</p>
+                        <pre className="p-3 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-xs text-red-800 dark:text-red-200 whitespace-pre-wrap break-words overflow-x-auto">
+                          {uploadState.errorMessage}
+                        </pre>
+                      </div>
+                    )}
+                    {uploadState.paperId && (
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mb-6">
+                        Paper ID: {uploadState.paperId} (use this when checking logs or reporting the issue)
+                      </p>
+                    )}
+                    <div className="flex justify-center flex-wrap gap-3 mb-6">
+                      <button
+                        onClick={() => router.push('/admin/activity')}
+                        className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-md hover:bg-gray-200 dark:hover:bg-gray-600 border border-gray-300 dark:border-gray-600"
+                      >
+                        View activity log
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <CheckCircleIcon className="h-16 w-16 text-green-600 dark:text-green-500 mx-auto mb-4" />
+                    <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">Processing Completed!</h2>
+                    <p className="text-gray-600 dark:text-gray-300 mb-6">
+                      Your question paper has been successfully processed and added to the database.
+                    </p>
+                  </>
+                )}
+                <div className="flex justify-center flex-wrap gap-4">
                   <button
                     onClick={() => router.push('/admin/dashboard')}
                     className="btn-primary"

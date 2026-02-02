@@ -8,12 +8,15 @@ import {
   ClockIcon,
   StarIcon,
   ArrowRightIcon,
-  ArrowLeftIcon
+  ArrowLeftIcon,
+  ChevronDownIcon,
+  ChevronUpIcon
 } from '@heroicons/react/24/outline'
 
 interface Question {
   question_id: number
   question_text: string
+  answer_text?: string
   marks?: number
   bloom_level?: number
   bloom_category?: string
@@ -37,6 +40,10 @@ export default function StudentPractice() {
   const [questions, setQuestions] = useState<Question[]>([])
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
   const [showAnswer, setShowAnswer] = useState(false)
+  // Reset answer visibility when changing question
+  useEffect(() => {
+    setShowAnswer(false)
+  }, [currentQuestionIndex])
   const [settings, setSettings] = useState<PracticeSettings>({
     course_code: '',
     unit_ids: [],
@@ -346,6 +353,27 @@ export default function StudentPractice() {
                   <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-4">
                     {questions[currentQuestionIndex].question_text}
                   </h3>
+                  {questions[currentQuestionIndex].answer_text && (
+                    <div className="mt-4 border-t border-gray-200 dark:border-gray-700 pt-4">
+                      <button
+                        type="button"
+                        onClick={() => setShowAnswer((prev) => !prev)}
+                        className="flex items-center text-sm font-medium text-primary-600 dark:text-primary-400 hover:underline"
+                      >
+                        {showAnswer ? (
+                          <ChevronUpIcon className="h-4 w-4 mr-1" />
+                        ) : (
+                          <ChevronDownIcon className="h-4 w-4 mr-1" />
+                        )}
+                        {showAnswer ? 'Hide Answer' : 'Answer'}
+                      </button>
+                      {showAnswer && (
+                        <div className="mt-3 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap">
+                          {questions[currentQuestionIndex].answer_text}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex justify-between items-center">

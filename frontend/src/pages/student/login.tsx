@@ -45,6 +45,7 @@ export default function StudentLogin() {
               width={100}
               height={100}
               className="h-auto mb-4"
+              style={{ width: 'auto', height: 'auto' }}
               priority
             />
             <Image
@@ -53,6 +54,7 @@ export default function StudentLogin() {
               width={250}
               height={75}
               className="h-auto mb-6"
+              style={{ width: 'auto', height: 'auto' }}
               priority
             />
             <h2 className="text-center text-3xl font-extrabold text-gray-900 dark:text-white">

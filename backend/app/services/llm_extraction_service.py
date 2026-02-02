@@ -1,8 +1,11 @@
 """
 LLM-Based Question Extraction Service
-Uses OpenAI API to extract questions, marks, and Bloom's taxonomy from question papers
+Uses OpenAI API to extract questions, marks, and Bloom's taxonomy from question papers.
+Supports direct PDF input via Responses API (no Poppler/image conversion needed).
 """
+import base64
 import json
+import os
 import re
 from typing import List, Dict, Optional
 from app.core.config import settings
@@ -27,36 +30,39 @@ class LLMExtractionService:
         self.client = OpenAI(api_key=settings.OPENAI_API_KEY)
         self.model = settings.OPENAI_MODEL
     
-    def extract_questions_with_llm(self, file_content: Dict) -> List[Dict]:
+    def extract_questions_with_llm(self, file_content: Dict, is_answer_scheme: bool = False) -> List[Dict]:
         """
         Extract questions from file content using LLM
         
         Args:
             file_content: Result from FileConversionService.prepare_for_llm()
+            is_answer_scheme: If True, document contains questions with answers; extract answer_text per question.
         
         Returns:
-            List of question dictionaries with:
-            - question_number: str (e.g., "1", "2.a", "2.b")
-            - question_text: str
-            - marks: int
-            - bloom_taxonomy_level: int (1-6)
-            - bloom_category: str
-            - has_diagram: bool
+            List of question dictionaries (with optional answer_text when is_answer_scheme).
         """
-        prompt = self._prepare_extraction_prompt()
-        
-        # Prepare messages for OpenAI API
+        content_blocks = file_content.get("content") or []
+        if not content_blocks:
+            # No document content (e.g. PDF conversion failed / empty) - do not call LLM or it may hallucinate
+            return []
+
+        prompt = self._prepare_extraction_prompt(is_answer_scheme=is_answer_scheme)
+        # Put document FIRST so the model clearly sees the source, then extraction instructions
+        user_content = content_blocks + [{"type": "text", "text": prompt}]
+
         messages = [
             {
                 "role": "system",
-                "content": "You are an expert at extracting questions from academic question papers. Extract all questions including subparts as separate entries."
+                "content": (
+                    "You extract questions ONLY from the document provided. "
+                    "Do not invent, generate, or add any question that is not present in that document. "
+                    "If the document is blank, unreadable, or has no questions, respond with {\"questions\": []}."
+                ),
             },
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt}
-                ] + file_content.get("content", [])
-            }
+                "content": user_content,
+            },
         ]
         
         try:
@@ -70,7 +76,7 @@ class LLMExtractionService:
             
             # Parse response
             response_text = response.choices[0].message.content
-            questions = self._parse_llm_response(response_text)
+            questions = self._parse_llm_response(response_text, is_answer_scheme=is_answer_scheme)
             
             # Handle subparts - ensure they're separate records
             processed_questions = self._handle_subparts(questions)
@@ -80,15 +86,71 @@ class LLMExtractionService:
         except Exception as e:
             raise Exception(f"LLM extraction failed: {e}")
     
-    def _prepare_extraction_prompt(self) -> str:
-        """Prepare prompt for question extraction"""
-        return """Extract all questions from this question paper. For each question, provide the following information in JSON format:
+    def extract_questions_from_pdf(self, pdf_path: str, is_answer_scheme: bool = False) -> List[Dict]:
+        """
+        Extract questions by sending the PDF directly to GPT-4o via the Responses API.
+        No Poppler or image conversion required; works for both text and image-based PDFs.
+        When is_answer_scheme is True, also extracts answer_text per question.
+        """
+        if not os.path.isfile(pdf_path):
+            raise Exception(f"PDF file not found: {pdf_path}")
+        prompt = self._prepare_extraction_prompt(is_answer_scheme=is_answer_scheme)
+        with open(pdf_path, "rb") as f:
+            pdf_bytes = f.read()
+        pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+        file_data = f"data:application/pdf;base64,{pdf_b64}"
+        filename = os.path.basename(pdf_path) or "paper.pdf"
+        instructions = "You are an expert at extracting questions from academic question papers. Extract all questions including subparts as separate entries."
+        try:
+            response = self.client.responses.create(
+                model=self.model,
+                instructions=instructions,
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_file", "filename": filename, "file_data": file_data},
+                            {"type": "input_text", "text": prompt},
+                        ],
+                    }
+                ],
+                text={"format": {"type": "json_object"}},
+                temperature=0.1,
+            )
+            response_text = getattr(response, "output_text", None) or self._get_output_text_from_response(response)
+            if not response_text:
+                raise Exception("No output text in Responses API response")
+            questions = self._parse_llm_response(response_text, is_answer_scheme=is_answer_scheme)
+            return self._handle_subparts(questions)
+        except Exception as e:
+            raise Exception(f"LLM extraction from PDF failed: {e}")
+    
+    def _get_output_text_from_response(self, response) -> Optional[str]:
+        """Extract output text from Responses API response object."""
+        for item in getattr(response, "output", []) or []:
+            if getattr(item, "content", None):
+                for part in item.content:
+                    if getattr(part, "type", None) == "output_text" and getattr(part, "text", None):
+                        return part.text
+        return None
+    
+    def _prepare_extraction_prompt(self, is_answer_scheme: bool = False) -> str:
+        """Prepare prompt for question extraction. When is_answer_scheme, also ask for answer_text per question."""
+        if is_answer_scheme:
+            return """From the document provided above, extract ONLY the questions (and answers when present) that actually appear in that document.
+
+The document may be in question-paper-only format or answer-scheme format (e.g. Q1 A1, Q2 A2, or question 1 followed by answer 1, etc.). Extract each question and, when an answer is given for that question in the document, put it in answer_text.
+
+CRITICAL: Include ONLY what is explicitly in the document. Do NOT invent or add any content. If you cannot see the document clearly or it has no questions, return exactly: {"questions": []}
+
+For each question in the document, output in this JSON format:
 
 {
   "questions": [
     {
       "question_number": "1",
-      "question_text": "Full question text including any diagrams or tables described in text",
+      "question_text": "Exact question text as it appears in the document",
+      "answer_text": "Exact answer for this question as it appears in the document, or null if the document has no answer for this question",
       "marks": 10,
       "bloom_taxonomy_level": 3,
       "bloom_category": "Applying",
@@ -97,19 +159,47 @@ class LLMExtractionService:
   ]
 }
 
-Important instructions:
-1. Extract ALL questions including subparts (2.a, 2.b, 3(i), 3(ii), etc.) as separate entries
-2. For questions with diagrams or tables, describe them in the question_text field
-3. Extract marks from the question (look for patterns like [10 marks], (10M), 10 marks, etc.)
-4. Determine Bloom's taxonomy level (1=Remembering, 2=Understanding, 3=Applying, 4=Analyzing, 5=Evaluating, 6=Creating)
-5. Set has_diagram to true if the question contains diagrams, figures, or tables
-6. If marks are not found, set marks to null
-7. If Bloom's level cannot be determined, use your best judgment based on question keywords
+Rules:
+1. Extract ALL questions that appear in the document, including subparts as separate entries.
+2. question_text and answer_text must be the actual text from the document.
+3. For answer-scheme format (Q1 A1, Q2 A2, etc.), match each answer to its question and set answer_text accordingly. If there is no answer for a question, set answer_text to null.
+4. Extract marks from the question when visible (e.g. [10 marks]). If not found, set marks to null.
+5. Bloom's level: 1=Remembering, 2=Understanding, 3=Applying, 4=Analyzing, 5=Evaluating, 6=Creating. Set has_diagram to true only if that question has diagrams/figures/tables.
+6. If the document is empty or has no exam questions, return {"questions": []}.
 
-Return ONLY valid JSON, no additional text."""
+Return ONLY valid JSON, no markdown or extra text."""
+        return """From the question paper document provided above, extract ONLY the questions that actually appear in that document.
+
+CRITICAL: Include ONLY questions that are explicitly written in the document. Do NOT invent, generate, or add any question. Do NOT use sample or example questions. If you cannot see the document clearly or it has no questions, return exactly: {"questions": []}
+
+For each question that appears in the document, output in this JSON format:
+
+{
+  "questions": [
+    {
+      "question_number": "1",
+      "question_text": "Exact or near-exact question text as it appears in the document",
+      "marks": 10,
+      "bloom_taxonomy_level": 3,
+      "bloom_category": "Applying",
+      "has_diagram": false
+    }
+  ]
+}
+
+Rules:
+1. Extract ALL questions that appear in the document, including subparts (2.a, 2.b, 3(i), 3(ii), etc.) as separate entries.
+2. question_text must be the actual text from the document (you may summarize diagrams/tables in words if needed).
+3. Extract marks from the question (e.g. [10 marks], (10M), 10 marks).
+4. Bloom's level: 1=Remembering, 2=Understanding, 3=Applying, 4=Analyzing, 5=Evaluating, 6=Creating.
+5. Set has_diagram to true only if that question in the document contains diagrams, figures, or tables.
+6. If marks are not found, set marks to null.
+7. If the document is empty, unreadable, or contains no exam questions, return {"questions": []}.
+
+Return ONLY valid JSON, no markdown or extra text."""
     
-    def _parse_llm_response(self, response_text: str) -> List[Dict]:
-        """Parse LLM JSON response"""
+    def _parse_llm_response(self, response_text: str, is_answer_scheme: bool = False) -> List[Dict]:
+        """Parse LLM JSON response. When is_answer_scheme, include answer_text in validated questions."""
         try:
             # Clean response text (remove markdown code blocks if present)
             response_text = response_text.strip()
@@ -135,7 +225,7 @@ Return ONLY valid JSON, no additional text."""
             # Validate and clean each question
             validated_questions = []
             for q in questions:
-                validated = self._validate_question(q)
+                validated = self._validate_question(q, is_answer_scheme=is_answer_scheme)
                 if validated:
                     validated_questions.append(validated)
             
@@ -146,8 +236,8 @@ Return ONLY valid JSON, no additional text."""
         except Exception as e:
             raise Exception(f"Error processing LLM response: {e}")
     
-    def _validate_question(self, question: Dict) -> Optional[Dict]:
-        """Validate and clean question data"""
+    def _validate_question(self, question: Dict, is_answer_scheme: bool = False) -> Optional[Dict]:
+        """Validate and clean question data. Optionally include answer_text when is_answer_scheme."""
         # Required fields
         if "question_number" not in question or "question_text" not in question:
             return None
@@ -161,6 +251,10 @@ Return ONLY valid JSON, no additional text."""
             "bloom_category": self._parse_bloom_category(question.get("bloom_category"), question.get("bloom_taxonomy_level")),
             "has_diagram": bool(question.get("has_diagram", False))
         }
+        if is_answer_scheme and question.get("answer_text") is not None:
+            validated["answer_text"] = str(question["answer_text"]).strip() or None
+        else:
+            validated["answer_text"] = None
         
         # Ensure question_text is not empty
         if not validated["question_text"]:

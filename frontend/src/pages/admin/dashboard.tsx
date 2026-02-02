@@ -33,7 +33,7 @@ interface ReviewItem {
 }
 
 export default function AdminDashboard() {
-  const { user, logout } = useAuth()
+  const { user, logout, loading: authLoading } = useAuth()
   const router = useRouter()
   const [stats, setStats] = useState<DashboardStats | null>(null)
   const [reviewItems, setReviewItems] = useState<ReviewItem[]>([])
@@ -95,11 +95,11 @@ export default function AdminDashboard() {
     router.push('/')
   }
 
-  if (loading) {
+  if (authLoading || loading) {
     return (
       <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center transition-colors">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600 mx-auto"></div>
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600 dark:border-primary-400 mx-auto"></div>
           <p className="mt-4 text-gray-600 dark:text-gray-300">Loading dashboard...</p>
         </div>
       </div>

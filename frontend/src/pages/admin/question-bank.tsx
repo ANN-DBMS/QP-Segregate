@@ -16,6 +16,7 @@ import toast from 'react-hot-toast'
 interface Question {
   question_id: number
   question_text: string
+  answer_text?: string
   marks?: number
   bloom_level?: number
   bloom_category?: string
@@ -63,6 +64,7 @@ export default function AdminQuestionBank() {
   const [totalResults, setTotalResults] = useState(0)
   const [currentPage, setCurrentPage] = useState(1)
   const [isInitialLoad, setIsInitialLoad] = useState(true)
+  const [openAnswers, setOpenAnswers] = useState<Record<number, boolean>>({})
 
   useEffect(() => {
     if (!user || user.role !== 'ADMIN') {
@@ -466,6 +468,32 @@ export default function AdminQuestionBank() {
                                 (e.target as HTMLImageElement).style.display = 'none'
                               }}
                             />
+                          </div>
+                        )}
+                        {question.answer_text && (
+                          <div className="mt-4 border-t border-gray-200 dark:border-gray-700 pt-4">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setOpenAnswers((prev) => ({
+                                  ...prev,
+                                  [question.question_id]: !prev[question.question_id],
+                                }))
+                              }
+                              className="flex items-center text-sm font-medium text-primary-600 dark:text-primary-400 hover:underline"
+                            >
+                              {openAnswers[question.question_id] ? (
+                                <ChevronUpIcon className="h-4 w-4 mr-1" />
+                              ) : (
+                                <ChevronDownIcon className="h-4 w-4 mr-1" />
+                              )}
+                              Answer
+                            </button>
+                            {openAnswers[question.question_id] && (
+                              <div className="mt-3 text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap">
+                                {question.answer_text}
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>

@@ -41,7 +41,8 @@ copy env.example .env
 Then edit `backend/.env` and update with your Supabase connection:
 
 ```env
-DATABASE_URL=postgresql://postgres:9MmID8s718tW7qns@db.sjngjegkghyfzdiiukhf.supabase.co:5432/postgres
+DATABASE_URL=postgresql://postgres:password@db.your-project.supabase.co:5432/postgres
+
 ```
 
 ### 2. Activate Virtual Environment
